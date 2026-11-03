@@ -202,12 +202,7 @@ bool core_settings_video_valid(uint16_t width, uint16_t height, uint8_t fps) {
     if ((width & 1) || (height & 1)) {
         return false;
     }
-    if (fps > CORE_VIDEO_FPS_MAX) {
-        return false;
-    }
-    /* Sensor/VENC ceiling is 30 fps at every size, including 2304×1296. */
-    if (width >= CORE_VIDEO_SENSOR_NATIVE_W && height >= CORE_VIDEO_SENSOR_NATIVE_H &&
-        fps > CORE_VIDEO_FPS_1080_MAX) {
+    if (fps > core_video_fps_ceiling(width, height)) {
         return false;
     }
     return true;
@@ -229,6 +224,15 @@ void core_settings_video_normalize(core_settings_t *s) {
         ESP_LOGW(TAG, "Video %ux%u allineato a %ux%u (griglia 16 px)",
                  (unsigned)ow, (unsigned)oh,
                  (unsigned)s->video_width, (unsigned)s->video_height);
+    }
+    {
+        const uint8_t cap = core_video_fps_ceiling(s->video_width, s->video_height);
+        if (s->video_fps > cap) {
+            ESP_LOGW(TAG, "Video %ux%u: fps %u oltre il tetto %u — ridotto",
+                     (unsigned)s->video_width, (unsigned)s->video_height,
+                     (unsigned)s->video_fps, (unsigned)cap);
+            s->video_fps = cap;
+        }
     }
     if (!core_settings_video_valid(s->video_width, s->video_height, s->video_fps)) {
         core_settings_video_set_defaults(s);

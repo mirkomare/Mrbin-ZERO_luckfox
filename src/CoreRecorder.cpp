@@ -1416,9 +1416,9 @@ static void rec_apply_selected_encode_size(uint16_t *w, uint16_t *h, uint8_t *fp
         if (*h > CORE_VIDEO_HEIGHT_MAX) {
             *h = (uint16_t)CORE_VIDEO_HEIGHT_MAX;
         }
-        /* 5 Mpixel circa: sopra, l'encode della Pico Zero è 8M@15 non 30. */
-        if (fps && (uint32_t)(*w) * (uint32_t)(*h) > 5000000u && *fps > 15) {
-            *fps = 15;
+        /* Sopra ~5 MP l'encode della Pico Zero è 8M@15, non 30. */
+        if (fps && *fps > core_video_fps_ceiling(*w, *h)) {
+            *fps = core_video_fps_ceiling(*w, *h);
         }
         ESP_LOGI(TAG, "Encode IMX415 %ux%u@%u",
                  (unsigned)*w, (unsigned)*h, (unsigned)(fps ? *fps : want_fps));
@@ -3839,12 +3839,11 @@ static bool photo_capture_start(photo_capture_t *pc, const core_settings_t *sett
         return false;
     }
 
-    // Sink > 1 fps: se negoziamo 1 fps AE/ISP restano neri (SC3336 25/30 only).
-    // Il 1 fps reale è imposto a wall-clock nel loop sessione.
+    // Sink > 1 fps: a 1 fps AE/ISP restano neri. Il 1 fps reale è nel loop.
+    // Sopra 5 MP il sensore/encode è 15, non 25.
     uint8_t sink_fps = 10;
-    if (pc->width >= CORE_VIDEO_SENSOR_NATIVE_W &&
-        pc->height >= CORE_VIDEO_SENSOR_NATIVE_H) {
-        sink_fps = (uint8_t)CORE_VIDEO_TL_PIPE_FPS;
+    if ((uint32_t)pc->width * (uint32_t)pc->height > CORE_VIDEO_PIXELS_5M) {
+        sink_fps = (uint8_t)CORE_VIDEO_FPS_ABOVE_5M;
     }
 
     esp_capture_sink_cfg_t sink_cfg = {

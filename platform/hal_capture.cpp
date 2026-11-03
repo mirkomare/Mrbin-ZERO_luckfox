@@ -177,15 +177,26 @@ static int rkmpi_rec_wants_3a(const cap_t *c) {
  * POST after stream-on. Recorder AE-discard covers the first kept frames. */
 
 static int rkmpi_keep_to_pipe_fps(int keep_fps, int w, int h) {
+    const int above_5m = ((uint32_t)w * (uint32_t)h > CORE_VIDEO_PIXELS_5M);
     if (keep_fps > (int)CORE_VIDEO_FPS_LOW_MAX) {
+        if (above_5m && keep_fps > (int)CORE_VIDEO_FPS_ABOVE_5M) {
+            return (int)CORE_VIDEO_FPS_ABOVE_5M;
+        }
         return keep_fps;
     }
-    /* SC3336 linear modes are 2304×1296 @ 25 and @ 30 only. VI@1–3 starves
-     * AE/ISP (all-zero / black NV12) and GetStream(200 ms) misses the frame. */
-    if (w >= (int)CORE_VIDEO_SENSOR_NATIVE_W && h >= (int)CORE_VIDEO_SENSOR_NATIVE_H) {
-        return (int)CORE_VIDEO_TL_PIPE_FPS;
+    /* 1–3 fps on VI starves AE/ISP. Hold a real sensor rate and drop in software.
+     * IMX415 above 5 MP tops at 15; smaller sizes stay at the 1080p pipe rate. */
+    if (above_5m) {
+        return (int)CORE_VIDEO_FPS_ABOVE_5M;
     }
     return (int)CORE_VIDEO_FPS_DEFAULT;
+}
+
+/* Above 1080p a full NV12 plane (2304×1296 is already ~4.5 MB, 8 MP ~12 MB)
+ * plus a second VI buffer and the VENC plane returns ENOMEM on ~24 MB CMA.
+ * H.264 uses one VI buffer and the online wrap ring. */
+static int rkmpi_above_1080p(int w, int h) {
+    return ((uint32_t)w * (uint32_t)h) > (1920u * 1080u);
 }
 
 static int rkmpi_3k_wrap_line(int vir_h) {
@@ -210,6 +221,10 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     if (h > CORE_VIDEO_HEIGHT_MAX) h = CORE_VIDEO_HEIGHT_MAX;
     if (keep_fps < CORE_VIDEO_FPS_MIN) keep_fps = CORE_VIDEO_FPS_MIN;
     if (keep_fps > CORE_VIDEO_FPS_MAX) keep_fps = CORE_VIDEO_FPS_MAX;
+    if ((uint32_t)w * (uint32_t)h > CORE_VIDEO_PIXELS_5M &&
+        keep_fps > (int)CORE_VIDEO_FPS_ABOVE_5M) {
+        keep_fps = (int)CORE_VIDEO_FPS_ABOVE_5M;
+    }
     int fps = rkmpi_keep_to_pipe_fps(keep_fps, w, h);
     if (fps < CORE_VIDEO_FPS_MIN) fps = CORE_VIDEO_FPS_MIN;
     if (fps > CORE_VIDEO_FPS_MAX) fps = CORE_VIDEO_FPS_MAX;
@@ -258,17 +273,15 @@ static int rkmpi_vi_venc_start(cap_t *c) {
 
     VI_CHN_ATTR_S va;
     memset(&va, 0, sizeof(va));
-    /* 24MB CMA. NV12 1080p ~3.1 MB/buf (2 bufs). Native 3K is ~4.48 MB/buf:
-     * two of those plus VENC's matching plane (cma 1094 pages) returns ENOMEM.
-     * H.264 3K uses one VI buf plus the online wrap ring.
-     * MJPEG on that ring encodes a uniform black frame (~600 bytes) while
-     * the ISP frame counter keeps climbing. Preview keeps one full buffer
-     * and does not arm wrap. */
-    const int full_3k = (w >= (int)CORE_VIDEO_SENSOR_NATIVE_W &&
-                         h >= (int)CORE_VIDEO_SENSOR_NATIVE_H);
-    const int native_3k = full_3k && !c->mjpeg;
+    /* 24MB CMA. NV12 1080p ~3.1 MB/buf (2 bufs). 2304×1296 is ~4.48 MB and
+     * 3840×2160 is ~12.4 MB: two full planes plus VENC return ENOMEM.
+     * H.264 above 1080p uses one VI buf plus the online wrap ring.
+     * MJPEG on that ring encodes a uniform black frame. Preview and JPEG
+     * keep one full buffer and do not arm wrap. */
+    const int above_1080 = rkmpi_above_1080p(w, h);
+    const int h264_wrap = above_1080 && !c->mjpeg;
     const int scaled_hd = (w >= 1280 || h >= 720);
-    va.stIspOpt.u32BufCount = full_3k ? 1 : (scaled_hd ? 2 : 3);
+    va.stIspOpt.u32BufCount = above_1080 ? 1 : (scaled_hd ? 2 : 3);
     va.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
     va.stIspOpt.enCaptureType = VI_V4L2_CAPTURE_TYPE_VIDEO_CAPTURE_MPLANE;
     va.stIspOpt.bNoUseLibV4L2 = RK_TRUE;
@@ -289,8 +302,8 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     ret = RK_MPI_VI_SetChnAttr(0, c->chn, &va);
     if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VI_SetChnAttr rkisp_mainpath", ret);
     /* Wrap before EnableChn: the encoder ring is wrap_line rows, not a full
-     * 2304×1296 NV12 plane. Picture size stays pic/vir (same stride as VENC). */
-    if (native_3k) {
+     * NV12 plane. Picture size stays pic/vir (same stride as VENC). */
+    if (h264_wrap) {
         wrap_line = rkmpi_3k_wrap_line(c->vir_h);
         VI_CHN_BUF_WRAP_S wr;
         memset(&wr, 0, sizeof(wr));
@@ -400,8 +413,8 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     ea.stVencAttr.u32VirWidth = (RK_U32)(c->vir_w > 0 ? c->vir_w : RKMPI_ALIGN16(w));
     ea.stVencAttr.u32VirHeight = (RK_U32)(c->vir_h > 0 ? c->vir_h : RKMPI_ALIGN16(h));
     ea.stVencAttr.u32StreamBufCnt = 2;
-    if (full_3k) {
-        /* Full NV12 (2304*1296*3/2 → 4481024, 1094 pages) is the alloc
+    if (above_1080) {
+        /* A full NV12 plane above 1080p is the alloc
          * mpp_vcodec_chan_setup_hal_bufs rejected. Bitstream only. */
         RK_U32 stream = (RK_U32)w * (RK_U32)h / 2U;
         if (stream > (1536U * 1024U)) {
@@ -429,7 +442,7 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     }
     ret = RK_MPI_VENC_CreateChn(0, &ea);
     if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VENC_CreateChn", ret);
-    if (native_3k) {
+    if (h264_wrap) {
         if (wrap_line > 0) {
             VENC_CHN_BUF_WRAP_S vw;
             memset(&vw, 0, sizeof(vw));
@@ -450,15 +463,15 @@ static int rkmpi_vi_venc_start(cap_t *c) {
         }
         FILE *fp = fopen("/tmp/mrbin-mpi-start.log", "a");
         if (fp) {
-            fprintf(fp, "3k vir %dx%d vi_bufs 1 wrap %d stream %u\n",
+            fprintf(fp, "wrap vir %dx%d vi_bufs 1 wrap %d stream %u\n",
                     c->vir_w, c->vir_h, wrap_line, (unsigned)ea.stVencAttr.u32BufSize);
             fclose(fp);
         }
-    } else if (c->mjpeg && full_3k) {
-        ESP_LOGI("hal_cap", "MJPEG 3K senza wrap, VI bufs=1");
+    } else if (c->mjpeg && above_1080) {
+        ESP_LOGI("hal_cap", "MJPEG sopra 1080p senza wrap, VI bufs=1");
         FILE *fp = fopen("/tmp/mrbin-mpi-start.log", "a");
         if (fp) {
-            fprintf(fp, "3k mjpeg no wrap vir %dx%d stream %u\n",
+            fprintf(fp, "mjpeg no wrap vir %dx%d stream %u\n",
                     c->vir_w, c->vir_h, (unsigned)ea.stVencAttr.u32BufSize);
             fclose(fp);
         }
@@ -552,8 +565,7 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
     c->gop = gop;
     int fps = pipe;
     int wrap_line = c->wrap_line;
-    const int native_3k = (w >= (int)CORE_VIDEO_SENSOR_NATIVE_W &&
-                           h >= (int)CORE_VIDEO_SENSOR_NATIVE_H);
+    const int above_1080 = rkmpi_above_1080p(w, h);
 
     VENC_CHN_ATTR_S ea;
     memset(&ea, 0, sizeof(ea));
@@ -588,7 +600,7 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
                                  hf ? MIRROR_HORIZONTAL :
                                  vf ? MIRROR_VERTICAL : MIRROR_NONE;
     }
-    if (native_3k) {
+    if (above_1080) {
         RK_U32 stream = (RK_U32)w * (RK_U32)h / 2U;
         if (stream > (1536U * 1024U)) stream = 1536U * 1024U;
         if (stream < (512U * 1024U)) stream = 512U * 1024U;
@@ -604,7 +616,7 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
         rkmpi_vi_venc_stop(c);
         return -1;
     }
-    if (native_3k && wrap_line > 0) {
+    if (wrap_line > 0) {
         VENC_CHN_BUF_WRAP_S vw;
         memset(&vw, 0, sizeof(vw));
         vw.bEnable = RK_TRUE;
@@ -1090,6 +1102,11 @@ void hal_preview_stop(void) {
 
 void hal_preview_stop_force(void) {
     hal_preview_stop_impl(1);
+}
+#endif
+
+#ifdef LUCKFOX_RKMPI
+void hal_capture_user_request(void) {
 }
 #endif
 

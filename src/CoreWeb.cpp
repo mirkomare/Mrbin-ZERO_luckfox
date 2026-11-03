@@ -988,10 +988,11 @@ fieldset legend{font-weight:600;padding:0 6px}
 )HTML";
 
 static const char *REC_VIDEO_FORM_TAIL = R"HTML(
-<p class="hint">Camera <strong>SC3336</strong> (3 MP) + <strong>RV1103</strong> VENC H.264.
-Nativo sensore: <strong>2304×1296 @ 30 fps</strong> (3K-class / 3 MP — non 2880p).
-L'ISP scala a 1920×1080, 1280×720, 640×480 (e 1280×960 4:3).
-Tetto fps: <strong>30</strong> (nessun 3K@60). Il Live resta anteprima 640×480 MJPEG.
+<p class="hint">Camera <strong>IMX415</strong> (8 MP) + <strong>RV1106</strong> VENC H.264.
+Nativo sensore: <strong>3840×2160</strong>. Default <strong>1920×1080 @ 30 fps</strong>.
+Dal FullHD fino a 8 MP: 2304×1296, 2560×1440, 2880×1620 (ancora a 30 fps),
+3072×1728 e 3840×2160 a <strong>15 fps</strong> (sopra i 5 MP).
+Restano 720p, VGA e 1280×960. Il Live resta anteprima 640×480 MJPEG.
 Si applica al prossimo avvio registrazione (PIR o web).</p>
 <form method="POST" action="/rec_video" id="videoForm" onsubmit="return syncBeforeSave()">
 <fieldset>
@@ -1002,28 +1003,50 @@ Si applica al prossimo avvio registrazione (PIR o web).</p>
 <option value="1"%s>Timelapse foto (JPEG, 1 fps)</option>
 </select>
 <p class="hint" id="mediaHint" style="margin:6px 0 0">In modalità <strong>foto</strong> vengono salvati file <code>…_foto0001.jpg</code> a <strong>1 fps</strong> fisso.
-Per la massima definizione usa <strong>2304×1296</strong>. Con cifratura attiva JPEG e AVI usano AES (MRBI).</p>
+Per la massima definizione usa <strong>3840×2160</strong>. Con cifratura attiva JPEG e AVI usano AES (MRBI).</p>
 </fieldset>
 <fieldset>
-<legend>Modi SC3336 + RV1103 (tutte le coppie valide)</legend>
+<legend>Modi IMX415 (1080p fino a 8 MP, più le risoluzioni basse)</legend>
 <label>Preset</label>
 <select name="video_preset" id="preset" onchange="applyPreset()">
 <option value="">— personalizzato —</option>
-<optgroup label="3MP / 3K nativo — H.264 (2304×1296)">
-<option value="2304,1296,30">2304×1296 @ 30 fps (max nativo 3MP / 3K)</option>
-<option value="2304,1296,25">2304×1296 @ 25 fps (modo driver Rockchip)</option>
+<optgroup label="8 MP nativo — H.264 (3840×2160, max 15 fps)">
+<option value="3840,2160,15">3840×2160 @ 15 fps (8 MP)</option>
+<option value="3840,2160,10">3840×2160 @ 10 fps</option>
+</optgroup>
+<optgroup label="Oltre 5 MP — H.264 (3072×1728, max 15 fps)">
+<option value="3072,1728,15">3072×1728 @ 15 fps</option>
+<option value="3072,1728,10">3072×1728 @ 10 fps</option>
+</optgroup>
+<optgroup label="Quasi 5 MP — H.264 (2880×1620)">
+<option value="2880,1620,30">2880×1620 @ 30 fps</option>
+<option value="2880,1620,25">2880×1620 @ 25 fps</option>
+<option value="2880,1620,20">2880×1620 @ 20 fps</option>
+<option value="2880,1620,15">2880×1620 @ 15 fps</option>
+<option value="2880,1620,10">2880×1620 @ 10 fps</option>
+</optgroup>
+<optgroup label="QHD — H.264 (2560×1440)">
+<option value="2560,1440,30">2560×1440 @ 30 fps</option>
+<option value="2560,1440,25">2560×1440 @ 25 fps</option>
+<option value="2560,1440,20">2560×1440 @ 20 fps</option>
+<option value="2560,1440,15">2560×1440 @ 15 fps</option>
+<option value="2560,1440,10">2560×1440 @ 10 fps</option>
+</optgroup>
+<optgroup label="3 MP — H.264 (2304×1296)">
+<option value="2304,1296,30">2304×1296 @ 30 fps</option>
+<option value="2304,1296,25">2304×1296 @ 25 fps</option>
 <option value="2304,1296,20">2304×1296 @ 20 fps</option>
 <option value="2304,1296,15">2304×1296 @ 15 fps</option>
 <option value="2304,1296,10">2304×1296 @ 10 fps</option>
 </optgroup>
-<optgroup label="ISP FullHD — H.264 (1920×1080)">
-<option value="1920,1080,30">1920×1080 @ 30 fps</option>
+<optgroup label="FullHD — H.264 (1920×1080, default)">
+<option value="1920,1080,30">1920×1080 @ 30 fps (default)</option>
 <option value="1920,1080,25">1920×1080 @ 25 fps</option>
 <option value="1920,1080,20">1920×1080 @ 20 fps</option>
 <option value="1920,1080,15">1920×1080 @ 15 fps</option>
 <option value="1920,1080,10">1920×1080 @ 10 fps</option>
 </optgroup>
-<optgroup label="ISP HD 720p — H.264 (1280×720, default)">
+<optgroup label="HD 720p — H.264 (1280×720)">
 <option value="1280,720,30">1280×720 @ 30 fps</option>
 <option value="1280,720,25">1280×720 @ 25 fps</option>
 <option value="1280,720,20">1280×720 @ 20 fps</option>
@@ -1040,7 +1063,19 @@ Per la massima definizione usa <strong>2304×1296</strong>. Con cifratura attiva
 <option value="640,480,15">640×480 @ 15 fps</option>
 </optgroup>
 <optgroup label="Timelapse video — 1–3 fps">
-<option value="2304,1296,1">2304×1296 @ 1 fps (3MP)</option>
+<option value="3840,2160,1">3840×2160 @ 1 fps (8 MP)</option>
+<option value="3840,2160,2">3840×2160 @ 2 fps</option>
+<option value="3840,2160,3">3840×2160 @ 3 fps</option>
+<option value="3072,1728,1">3072×1728 @ 1 fps</option>
+<option value="3072,1728,2">3072×1728 @ 2 fps</option>
+<option value="3072,1728,3">3072×1728 @ 3 fps</option>
+<option value="2880,1620,1">2880×1620 @ 1 fps</option>
+<option value="2880,1620,2">2880×1620 @ 2 fps</option>
+<option value="2880,1620,3">2880×1620 @ 3 fps</option>
+<option value="2560,1440,1">2560×1440 @ 1 fps</option>
+<option value="2560,1440,2">2560×1440 @ 2 fps</option>
+<option value="2560,1440,3">2560×1440 @ 3 fps</option>
+<option value="2304,1296,1">2304×1296 @ 1 fps</option>
 <option value="2304,1296,2">2304×1296 @ 2 fps</option>
 <option value="2304,1296,3">2304×1296 @ 3 fps</option>
 <option value="1920,1080,1">1920×1080 @ 1 fps</option>
@@ -1051,7 +1086,11 @@ Per la massima definizione usa <strong>2304×1296</strong>. Con cifratura attiva
 <option value="1280,720,3">1280×720 @ 3 fps</option>
 </optgroup>
 <optgroup label="Timelapse foto JPEG — 1 fps">
-<option value="2304,1296,1">2304×1296 @ 1 fps (3MP)</option>
+<option value="3840,2160,1">3840×2160 @ 1 fps (8 MP)</option>
+<option value="3072,1728,1">3072×1728 @ 1 fps</option>
+<option value="2880,1620,1">2880×1620 @ 1 fps</option>
+<option value="2560,1440,1">2560×1440 @ 1 fps</option>
+<option value="2304,1296,1">2304×1296 @ 1 fps</option>
 <option value="1920,1080,1">1920×1080 @ 1 fps</option>
 <option value="1280,720,1">1280×720 @ 1 fps</option>
 <option value="640,480,1">640×480 @ 1 fps</option>
@@ -1117,9 +1156,13 @@ function applyPreset(){
   document.getElementById('video_fps').value=p[2];
   updateWarn();
 }
-function clampFullHdFps(){
+function fpsCap(){
   var w=parseInt(document.getElementById('video_w').value)||0;
   var h=parseInt(document.getElementById('video_h').value)||0;
+  if((w*h)>PIX5M) return N5MF;
+  return N1080F;
+}
+function clampFullHdFps(){
   var fEl=document.getElementById('video_fps');
   var f=parseInt(fEl.value)||0;
   var photo=document.getElementById('rec_media').value==='1';
@@ -1127,8 +1170,9 @@ function clampFullHdFps(){
     fEl.value=1;
     return;
   }
-  if(!photo&&f>N1080F){
-    fEl.value=N1080F;
+  var cap=fpsCap();
+  if(f>cap){
+    fEl.value=cap;
   }
 }
 function syncBeforeSave(){
@@ -1142,27 +1186,28 @@ function onMediaChange(){
   var fEl=document.getElementById('video_fps');
   if(photo){
     hint.innerHTML="Modalit\u00E0 <strong>foto</strong>: JPEG <code>…_foto0001.jpg</code> a <strong>1 fps</strong> fisso. "
-      +"L'AVI esportato usa 1 fps. Max SC3336: 2304\u00D71296.";
+      +"L'AVI esportato usa 1 fps. Max IMX415: 3840\u00D72160.";
     fEl.value=1;
     clampFullHdFps();
   }else{
-    hint.innerHTML="Video H264 (MP4). SC3336 nativo 2304\u00D71296 @ 30 fps (3MP / 3K-class). L'ISP scala 1080p / 720p / VGA. Codec: H.264.";
+    hint.innerHTML="Video H264 (MP4). IMX415 nativo 3840\u00D72160. Default 1920\u00D71080 @ 30 fps. "
+      +"Sopra 5 MP il tetto \u00E8 15 fps. Codec: H.264.";
   }
   updateWarn();
 }
-var NW=%u,NH=%u,NF=%u,N1080F=%u,MAXW=%u,MAXH=%u;
+var NW=%u,NH=%u,NF=%u,N1080F=%u,N5MF=%u,PIX5M=%u,MAXW=%u,MAXH=%u;
 function updateWarn(){
   var w=parseInt(document.getElementById('video_w').value)||0;
   var h=parseInt(document.getElementById('video_h').value)||0;
   var f=parseInt(document.getElementById('video_fps').value)||0;
   var photo=document.getElementById('rec_media').value==='1';
   var m=[];
-  if(w>MAXW||h>MAXH)m.push("supera il massimo SC3336 "+MAXW+"\u00D7"+MAXH);
-  if(w>=2304&&h>=1296)m.push("3MP/3K 2304\u00D71296: VENC RV1103 lo accetta (4MP@30), ma 64 MB RAM possono far fallire i buffer");
-  else if(w>=1920&&h>=1080)m.push("FullHD: ISP scala dal nativo 2304\u00D71296");
+  if(w>MAXW||h>MAXH)m.push("supera il massimo IMX415 "+MAXW+"\u00D7"+MAXH);
+  if((w*h)>PIX5M)m.push("sopra 5 MP: encode a "+N5MF+" fps (8 MP \u00E8 3840\u00D72160)");
+  else if(w>1920||h>1080)m.push("sopra il FullHD: l'ISP scala dal nativo 3840\u00D72160");
   if(photo&&f!==1)m.push("timelapse foto: solo 1 fps (verrà forzato)");
-  if(!photo&&w>=%u&&h>=%u&&f>N1080F)m.push("3MP video: massimo "+N1080F+" fps (sensore/VENC)");
-  if(!photo&&f>NF)m.push("frame rate oltre il massimo SC3336 ("+NF+" fps): non supportato");
+  if(!photo&&f>fpsCap())m.push("frame rate oltre il tetto di questa risoluzione ("+fpsCap()+" fps)");
+  if(!photo&&f>NF)m.push("frame rate oltre il massimo ("+NF+" fps): non supportato");
   if(!photo&&m.length===0&&w*h*f>NW*NH*NF)m.push("pixel-rate superiore al profilo di riferimento "+NW+"\u00D7"+NH+"@"+NF);
   var d=document.getElementById('perfWarn');
   if(m.length){
@@ -3877,7 +3922,7 @@ static esp_err_t handle_rec_video_get(httpd_req_t *req) {
     // HTML from NVS/settings only — never open V4L2 / RKMPI / I2C sensor here.
     // Luckfox HAL chunked responses used to omit the header blank line and
     // freeze the browser (and the single-thread HTTP server) on this page.
-    const size_t html_cap = 32768;
+    const size_t html_cap = 65536;
     char *html = (char *)malloc(html_cap);
     if (!html) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
@@ -3888,7 +3933,7 @@ static esp_err_t handle_rec_video_get(httpd_req_t *req) {
     bool osd_en = s_settings ? s_settings->osd_enable : true;
     char rtsp_url[80];
     core_rtsp_url(rtsp_url, sizeof(rtsp_url));
-    int off = snprintf(html, html_cap, "%s%s<h2>Registrazione video (H264 SD)</h2>%s%s%s",
+    int off = snprintf(html, html_cap, "%s%s<h2>Registrazione video IMX415 (H264 SD)</h2>%s%s%s",
                        REC_VIDEO_HTML_HEAD, web_nav(), flash, stats, last_pipe);
     if (off < 0) {
         off = 0;
@@ -3918,7 +3963,7 @@ static esp_err_t handle_rec_video_get(httpd_req_t *req) {
              (unsigned)osd_xp, (unsigned)osd_yp,
              (unsigned)CORE_VIDEO_PRESET_OK_WIDTH, (unsigned)CORE_VIDEO_PRESET_OK_HEIGHT,
              (unsigned)CORE_VIDEO_PRESET_OK_FPS, (unsigned)CORE_VIDEO_FPS_1080_MAX,
-             (unsigned)CORE_VIDEO_WIDTH_MAX, (unsigned)CORE_VIDEO_HEIGHT_MAX,
+             (unsigned)CORE_VIDEO_FPS_ABOVE_5M, (unsigned)CORE_VIDEO_PIXELS_5M,
              (unsigned)CORE_VIDEO_WIDTH_MAX, (unsigned)CORE_VIDEO_HEIGHT_MAX);
     if (form_len < 0 || (off + form_len) >= (int)html_cap) {
         ESP_LOGW(TAG, "Form rec_video troncato (%d+%d B > %u)", off, form_len,
@@ -3970,11 +4015,13 @@ static esp_err_t handle_rec_video_post(httpd_req_t *req) {
              w_s[0] ? w_s : "?", h_s[0] ? h_s : "?", fps_s[0] ? fps_s : "?",
              (unsigned)w, (unsigned)h, (unsigned)fps);
 
-    if (w >= CORE_VIDEO_WIDTH_MAX && h >= CORE_VIDEO_HEIGHT_MAX &&
-        fps > CORE_VIDEO_FPS_1080_MAX) {
-        ESP_LOGW(TAG, "3MP/max: fps %u > %u — ridotto automaticamente",
-                 (unsigned)fps, (unsigned)CORE_VIDEO_FPS_1080_MAX);
-        fps = (uint8_t)CORE_VIDEO_FPS_1080_MAX;
+    {
+        const uint8_t cap = core_video_fps_ceiling(w, h);
+        if (fps > cap) {
+            ESP_LOGW(TAG, "Video %ux%u: fps %u > tetto %u — ridotto",
+                     (unsigned)w, (unsigned)h, (unsigned)fps, (unsigned)cap);
+            fps = cap;
+        }
     }
 
     if (!core_settings_video_valid(w, h, fps)) {

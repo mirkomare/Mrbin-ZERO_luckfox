@@ -106,6 +106,10 @@ static_assert(CORE_GPIO_DEMO == 59, "PIN: DEMO = linux 59 (GPIO1_D3, non GPIO2_A
 #define CORE_VIDEO_FPS_MIN          1
 #define CORE_VIDEO_FPS_MAX          30
 #define CORE_VIDEO_FPS_LOW_MAX      3
+#define CORE_VIDEO_FPS_1080_MAX     30
+/* Pico Zero: encode 5M@30, 8M@15. Sopra questa area il tetto fps è 15. */
+#define CORE_VIDEO_PIXELS_5M        5000000u
+#define CORE_VIDEO_FPS_ABOVE_5M     15
 /* SC3336 rkisp only has 25/30 modes. Drive VI/VENC at this rate for 1–3 fps
  * timelapse; keep the NVS rate in software. 1 fps on VI blacks AE/ISP. */
 #define CORE_VIDEO_TL_PIPE_FPS      25
@@ -128,7 +132,14 @@ static inline uint16_t core_video_align16(uint16_t v, uint16_t native) {
     }
     return v;
 }
-#define CORE_VIDEO_FPS_1080_MAX      30
+
+/* Tetto fps che VENC può davvero tenere a questa misura. */
+static inline uint8_t core_video_fps_ceiling(uint16_t w, uint16_t h) {
+    if ((uint32_t)w * (uint32_t)h > CORE_VIDEO_PIXELS_5M) {
+        return (uint8_t)CORE_VIDEO_FPS_ABOVE_5M;
+    }
+    return (uint8_t)CORE_VIDEO_FPS_MAX;
+}
 #define CORE_IMX708_CLEAN_W          1904
 #define CORE_IMX708_CLEAN_H          1072
 #define CORE_VIDEO_WIDTH            CORE_VIDEO_WIDTH_DEFAULT
