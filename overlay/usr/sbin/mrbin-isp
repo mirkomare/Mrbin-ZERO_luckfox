@@ -47,18 +47,10 @@ start_3a() {
     fi
     mkdir -p /var/run /tmp
     before=$(armed_count)
-    (
-        exec 0</dev/null
-        exec 1>>"$LOG"
-        exec 2>&1
-        i=3
-        while [ "$i" -lt 64 ]; do
-            eval "exec $i>&-" 2>/dev/null || true
-            i=$((i + 1))
-        done
-        # BusyBox start-stop-daemon drops this and the server dies lime-green.
-        exec env LD_LIBRARY_PATH="$RKLIB" nice -n 10 "$SERVER"
-    ) &
+    # Do not close fds in this shell: BusyBox ash is reading the script
+    # from one of them and exits before exec. Do not use start-stop-daemon:
+    # it drops LD_LIBRARY_PATH and the ISP stays green.
+    env LD_LIBRARY_PATH="$RKLIB" nice -n 10 "$SERVER" </dev/null >>"$LOG" 2>&1 &
     echo $! >"$PIDFILE"
     i=0
     while [ "$i" -lt 40 ]; do
