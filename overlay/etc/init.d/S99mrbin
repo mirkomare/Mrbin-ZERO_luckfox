@@ -1,0 +1,28 @@
+#!/bin/sh
+# Avvia mrbin-core sulla Pico Zero. I pin sono in /etc/mrbin/pins.env.
+case "$1" in
+start)
+	mkdir -p /var/run /tmp
+	killall rkipc >/dev/null 2>&1 || true
+	if [ ! -x /usr/bin/mrbin-core ]; then
+		exit 0
+	fi
+	if [ -f /var/run/mrbin-core.pid ] && kill -0 "$(cat /var/run/mrbin-core.pid)" >/dev/null 2>&1; then
+		exit 0
+	fi
+	/usr/bin/mrbin-core >/tmp/mrbin-core.log 2>&1 &
+	echo $! >/var/run/mrbin-core.pid
+	;;
+stop)
+	if [ -f /var/run/mrbin-core.pid ]; then
+		kill "$(cat /var/run/mrbin-core.pid)" >/dev/null 2>&1 || true
+		rm -f /var/run/mrbin-core.pid
+	fi
+	killall mrbin-core >/dev/null 2>&1 || true
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+	;;
+esac
+exit 0
