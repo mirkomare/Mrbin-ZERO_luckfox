@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Overlay MrBin per Luckfox Pico Zero.
+ * Si compila solo dentro l'SDK Luckfox, che fornisce rv1106g-luckfox-pico-zero.dts.
+ * IMX415 4 lane al posto di SC3336. MIA1321 spento. WiFi SDIO e eMMC non si toccano.
+ */
+#include "rv1106g-luckfox-pico-zero.dts"
+
+/ {
+	model = "Luckfox Pico Zero MrBin IMX415";
+};
+
+&mia1321 {
+	status = "disabled";
+};
+
+&imx415 {
+	status = "okay";
+	reset-gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
+};
+
+&work_led {
+	linux,default-trigger = "none";
+	default-state = "off";
+	gpios = <&gpio3 RK_PC6 GPIO_ACTIVE_HIGH>;
+};
+
+&spi0 {
+	status = "disabled";
+};
+
+&pinctrl {
+	mrbin {
+		mrbin_header: mrbin-header {
+			rockchip,pins =
+				<3 RK_PC6 RK_FUNC_GPIO &pcfg_pull_none>,
+				<1 RK_PC7 RK_FUNC_GPIO &pcfg_pull_up>,
+				<1 RK_PC5 RK_FUNC_GPIO &pcfg_pull_up>,
+				<1 RK_PC4 RK_FUNC_GPIO &pcfg_pull_up>,
+				<1 RK_PD2 RK_FUNC_GPIO &pcfg_pull_up>,
+				<1 RK_PC0 RK_FUNC_GPIO &pcfg_pull_none>,
+				<2 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>,
+				<1 RK_PD3 RK_FUNC_GPIO &pcfg_pull_up>,
+				<1 RK_PC1 RK_FUNC_GPIO &pcfg_pull_up>,
+				<1 RK_PC2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};

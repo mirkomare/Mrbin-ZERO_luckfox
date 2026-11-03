@@ -1,0 +1,8 @@
+config BR2_PACKAGE_MRBIN_CORE_LUCKFOX
+	bool "mrbin-core-luckfox"
+	depends on BR2_arm
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_LIBCURL
+	help
+	  MrBin CORE firmware port for Luckfox Pico Plus (RV1103).
+	  HTTP :1510, AES-128-CTR SD, AES-256-GCM cloud upload.

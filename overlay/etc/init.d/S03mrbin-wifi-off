@@ -1,0 +1,6 @@
+#!/bin/sh
+# All'avvio la radio resta giù. mrbin-core la accende solo in Config e RTC.
+if [ -d /sys/class/net/wlan0 ]; then
+    wpa_cli -i wlan0 terminate >/dev/null 2>&1
+    ip link set wlan0 down >/dev/null 2>&1 || ifconfig wlan0 down >/dev/null 2>&1
+fi

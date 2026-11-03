@@ -8,3 +8,9 @@ credentials.yml
 secrets.json
 id_rsa
 id_ed25519
+wifi.env
+wpa.conf
+wpa_supplicant.conf
+nvs.bin
+*.img
+/build/
