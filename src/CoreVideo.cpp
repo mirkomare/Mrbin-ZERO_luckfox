@@ -221,6 +221,14 @@ int core_video_device_fd(void) {
 
 // SC3336: V4L2_CID_HFLIP/VFLIP on the sensor subdev. video0 (rkcif) has no flip.
 static void core_video_apply_flip(void) {
+#ifdef LUCKFOX_RKMPI
+    /* VENC enMirror already turns the picture. The IMX415 subdev accepts
+     * the same flags, so doing both cancels out and the checkbox looks unsaved. */
+    s_flip_hw_ok = true;
+    ESP_LOGI(TAG, "Orientamento encoder: capovolgi=%d specchia=%d",
+             (int)s_vflip, (int)s_hflip);
+    return;
+#endif
     s_flip_hw_ok = false;
     char devname[80] = {0};
     int fd = core_video_open_sensor_flip_fd(devname, sizeof(devname));

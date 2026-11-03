@@ -913,6 +913,13 @@ int hal_preview_start(int w, int h, int fps, int vi_user_depth) {
     ea.stVencAttr.u32VirHeight = (RK_U32)h;
     ea.stVencAttr.u32StreamBufCnt = 2;
     ea.stVencAttr.u32BufSize = (RK_U32)w * (RK_U32)h;
+    {
+        const bool hf = core_video_get_hflip();
+        const bool vf = core_video_get_vflip();
+        ea.stVencAttr.enMirror = (hf && vf) ? MIRROR_BOTH :
+                                 hf ? MIRROR_HORIZONTAL :
+                                 vf ? MIRROR_VERTICAL : MIRROR_NONE;
+    }
     ret = RK_MPI_VENC_CreateChn(1, &ea);
     if (ret != RK_SUCCESS) {
         (void)RK_MPI_VI_DisableChn(0, 1);
