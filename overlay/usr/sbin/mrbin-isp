@@ -1,0 +1,158 @@
+#!/bin/sh
+# Pico Zero, IMX415. live-pre starts the stock 3A server before EnableChn.
+# IQ is whatever is already in /etc/iqfiles (symlink to the oem IMX415 JSON).
+# No SC3336 bind-mount. stop-3a kills the server only when VI is already closed.
+
+SERVER=/oem/usr/bin/rkaiq_3A_server
+RKLIB=/oem/usr/lib
+PIDFILE=/var/run/rkaiq_3A_server.pid
+LOG=/tmp/rkaiq_3A.log
+IQDIR=/etc/iqfiles
+
+is_3a() {
+    pidof rkaiq_3A_server >/dev/null 2>&1
+}
+
+# True while rkisp/cif still has a capture node open.
+vi_open() {
+    dev=
+    for dev in /dev/video11 /dev/video12 /dev/video0; do
+        [ -e "$dev" ] || continue
+        if fuser "$dev" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+armed_count() {
+    n=$(grep -c 'wait stream start event' "$LOG" 2>/dev/null || true)
+    n=$(printf '%s' "$n" | tr -cd '0-9')
+    [ -n "$n" ] || n=0
+    echo "$n"
+}
+
+start_3a() {
+    if is_3a; then
+        echo "mrbin-isp: 3A already up pid=$(pidof rkaiq_3A_server | tr '\n' ' ')"
+        return 0
+    fi
+    if [ ! -x "$SERVER" ]; then
+        echo "mrbin-isp: missing $SERVER"
+        return 1
+    fi
+    if [ ! -e "$IQDIR" ]; then
+        echo "mrbin-isp: $IQDIR missing — IMX415 IQ not mounted"
+        return 1
+    fi
+    mkdir -p /var/run /tmp
+    before=$(armed_count)
+    (
+        exec 0</dev/null
+        exec 1>>"$LOG"
+        exec 2>&1
+        i=3
+        while [ "$i" -lt 64 ]; do
+            eval "exec $i>&-" 2>/dev/null || true
+            i=$((i + 1))
+        done
+        # BusyBox start-stop-daemon drops this and the server dies lime-green.
+        exec env LD_LIBRARY_PATH="$RKLIB" nice -n 10 "$SERVER"
+    ) &
+    echo $! >"$PIDFILE"
+    i=0
+    while [ "$i" -lt 40 ]; do
+        now=$(armed_count)
+        if is_3a && [ "$now" -gt "$before" ] 2>/dev/null; then
+            echo "mrbin-isp: 3A armed for stream-on (IQ $IQDIR, no SC3336 bind)"
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 0.2
+    done
+    if is_3a; then
+        echo "mrbin-isp: 3A up but not armed yet"
+        return 0
+    fi
+    echo "mrbin-isp: 3A failed to start"
+    return 1
+}
+
+# Caller must have closed VI first. Killing 3A during DisableChn
+# leaves rockit blocked on the stream-off event.
+stop_3a() {
+    if vi_open; then
+        echo "mrbin-isp: stop-3a refused — VI still open"
+        return 0
+    fi
+    if ! is_3a; then
+        rm -f "$PIDFILE"
+        echo "mrbin-isp: stop-3a — 3A already down"
+        return 0
+    fi
+    killall -9 rkaiq_3A_server >/dev/null 2>&1 || true
+    i=0
+    while is_3a && [ "$i" -lt 15 ]; do
+        sleep 0.02
+        i=$((i + 1))
+    done
+    rm -f "$PIDFILE"
+    if is_3a; then
+        echo "mrbin-isp: stop-3a — 3A still up"
+        return 1
+    fi
+    echo "mrbin-isp: stop-3a — 3A down"
+    return 0
+}
+
+case "${1:-start}" in
+    start)
+        # Boot: do not start 3A before the pipeline exists.
+        echo "mrbin-isp: start — 3A left down until live-pre"
+        ;;
+    live-pre)
+        # mrbin-core calls this after VI configure and before EnableChn.
+        start_3a
+        ;;
+    live-3a)
+        # VI is open. Do not start a late 3A (UV stays 128) and do not
+        # stop the one live-pre already armed.
+        if is_3a; then
+            echo "mrbin-isp: live-3a — keep 3A pid=$(pidof rkaiq_3A_server | tr '\n' ' ')"
+        else
+            echo "mrbin-isp: live-3a — no 3A from live-pre, skip late start"
+        fi
+        ;;
+    stop-3a)
+        stop_3a
+        ;;
+    rec-begin)
+        # Leftover 3A only. VI for this recording is not open yet.
+        stop_3a
+        echo "mrbin-isp: rec-begin — 3A=$(is_3a && echo yes || echo no)"
+        ;;
+    rec-3a)
+        start_3a
+        echo "mrbin-isp: rec-3a — 3A=$(is_3a && echo yes || echo no)"
+        ;;
+    rec-end)
+        stop_3a
+        echo "mrbin-isp: rec-end — 3A=$(is_3a && echo yes || echo no)"
+        ;;
+    pir-arm)
+        if ! is_3a; then
+            start_3a || true
+        fi
+        echo "mrbin-isp: pir-arm — 3A=$(is_3a && echo yes || echo no)"
+        ;;
+    pir-lock|apply|after-boot|watch|ae-follow|pir-pre|pir-hold)
+        echo "mrbin-isp: $1 — no SC3336 AE/IQ override"
+        ;;
+    stop)
+        stop_3a
+        ;;
+    *)
+        echo "Usage: $0 {start|live-pre|live-3a|stop-3a|rec-begin|rec-3a|rec-end|pir-arm|stop}"
+        exit 1
+        ;;
+esac
