@@ -18,21 +18,22 @@ Non si usano:
 - reset camera GPIO3_C5 e I2C4_M2 GPIO3_C7 / GPIO3_D0 (bus IMX415);
 - GPIO1_B2 / GPIO1_B3: console di debug, il DTS lascia `fiq_debugger` acceso.
 
-I pad scelti sono GPIO di default (`_d`), con SPI0 spento così C0–C2 restano GPIO per DONE e per l’RTC a bitbang.
+Un pin del connettore si usa solo se il pinout ufficiale Luckfox Pico Zero non ci stampa I2C, SPI, UART, SDIO, eMMC o BOOT. PWM non è in quella lista. Sul connettore da 40 pin i GPIO così fatti sono cinque: pin 12 (GPIO1_C6, solo PWM10), pin 22 (GPIO1_D3, nessuna funzione), pin 36 (GPIO1_C7, solo PWM11), pin 38 (GPIO0_A3, nessuna funzione), pin 40 (GPIO0_A4, solo PWM1). DEMO e SQW occupano già pin 22 e pin 36. Restano tre pin puliti: lì vanno DONE e l’RTC. Non c’è un quarto.
 
 ## Righe importanti
 
-| Funzione | rv1106 Pro/Max | Pico Zero | Perché si sposta |
+| Funzione | Prima sulla Zero | Adesso | Perché |
 |---|---|---|---|
-| LED | GPIO1_B2, linux 42, header 1 | GPIO3_C6, linux 118, USER LED | Sulla Zero B2 è la UART di debug. Il LED di scheda è già C6 e non è uno strap. |
-| MODE (alto = Config) | GPIO1_C5, linux 53, header 6 | GPIO1_C5, linux 53 | Libero: non è SDIO WiFi né eMMC. |
-| D1 PIR (basso = wake) | GPIO1_C4, linux 52, header 7 | GPIO1_C4, linux 52 | Stesso motivo. L’alternativa SDMMC1_M1 non è il bus usato dalla TF. |
-| D2 stop | GPIO1_D2, linux 58, header 9 | GPIO1_D2, linux 58 | Pad GPIO, fuori da WiFi e boot. |
-| DONE | GPIO1_C0, linux 48, header 12 | GPIO1_C0, linux 48 | SPI0 è disabled nel DTS Zero. |
-| SQW RTC | GPIO1_C7, linux 55, header 4 | GPIO1_C7, linux 55 | Invariato, non è uno strap. |
-| RTC SDA / SCL | GPIO1_C1 (49) / C2 (50) | uguale, bitbang | I2C4 di CSI è su C7/D0. SPI0 spento. |
-| MODEM_PWR | GPIO2_B1, linux 73, header 11 | GPIO2_B1, linux 73 | Il banco SD è GPIO2_A, non B. |
-| DEMO | GPIO2_A0, linux 64, header 24 | GPIO1_D3, linux 59 | GPIO2_A0 è SDMMC1_D1 della TF. |
+| LED | GPIO3_C6, linux 118, USER LED | invariato | Non è un pin del connettore. |
+| DONE | GPIO1_C0, linux 48, pin 24, SPI0_CS0 | GPIO0_A4, linux 4, pin 40 | Il pinout stampa solo PWM1_M0. Niente I2C, SPI o UART. |
+| RTC SDA | GPIO1_C1, linux 49, pin 23, SPI0_CLK | GPIO1_C6, linux 54, pin 12 | Il pinout stampa solo PWM10_M1. |
+| RTC SCL | GPIO1_C2, linux 50, pin 19, SPI0_MOSI | GPIO0_A3, linux 3, pin 38 | Il pinout non stampa nessuna funzione alternativa. |
+| SQW RTC | GPIO1_C7, linux 55, pin 36 | invariato | Il pinout stampa solo PWM11_IR_M1. |
+| DEMO | GPIO1_D3, linux 59, pin 22 | invariato | Il pinout non stampa I2C, SPI o UART. Sulla Pro/Max era GPIO2_A0, che qui è la TF. |
+| MODE (alto = Config) | GPIO1_C5, linux 53, pin 32 | invariato | Non è I2C1: il pinout stampa UART4_TX_M1. I tre GPIO puliti sono già presi. |
+| D1 PIR (basso = wake) | GPIO1_C4, linux 52, pin 33 | invariato | Non è I2C1: il pinout stampa UART4_RX_M1. Stesso motivo. |
+| D2 stop | GPIO1_D2, linux 58, pin 26 | invariato | Il pinout stampa SPI0_CS1. Non resta un GPIO senza quel bus. |
+| MODEM_PWR | GPIO2_B1, linux 73, pin 27 | invariato | Il pinout stampa I2C1_SDA_M1 e UART0_TX_M1. Non resta un GPIO pulito. |
 
 ## Pad vietati
 

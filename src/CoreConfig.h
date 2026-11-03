@@ -15,18 +15,20 @@
 // TF SDMMC1 GPIO2_A*. CSI IMX415: reset GPIO3_C5, I2C4_M2 GPIO3_C7/D0.
 //
 //   LED          → GPIO3_C6   linux 118  USER LED di scheda (non GPIO1_B2 / UART debug)
-//   SQW          → GPIO1_C7   linux  55
-//   MODE         → GPIO1_C5   linux  53  HIGH = CONFIG
-//   D1 PIR wake  → GPIO1_C4   linux  52  LOW active
-//   D2 end       → GPIO1_D2   linux  58  LOW active
-//   MODEM_PWR    → GPIO2_B1   linux  73  HIGH = on (non è il banco SD GPIO2_A)
-//   DONE TPL     → GPIO1_C0   linux  48  HIGH = shutdown. SPI0 resta disabled.
-//   DEMO jumper  → GPIO1_D3   linux  59  LOW + MODE HIGH. Spostato da GPIO2_A0 (SD).
-//   RTC I2C      → SDA GPIO1_C1 (49), SCL GPIO1_C2 (50), bitbang. SPI0 disabled.
+//   SQW          → GPIO1_C7   linux  55  pin 36, il pinout stampa solo PWM11
+//   MODE         → GPIO1_C5   linux  53  pin 32, UART4_TX (non I2C1). Resta: i GPIO
+//                              senza bus sul connettore sono già usati.
+//   D1 PIR wake  → GPIO1_C4   linux  52  pin 33, UART4_RX (non I2C1). Stesso motivo.
+//   D2 end       → GPIO1_D2   linux  58  pin 26, SPI0_CS1. Nessun altro GPIO pulito.
+//   MODEM_PWR    → GPIO2_B1   linux  73  pin 27, I2C1_SDA + UART0_TX. Stesso motivo.
+//   DONE TPL     → GPIO0_A4   linux   4  pin 40. Il pinout stampa solo PWM1, non SPI.
+//   DEMO jumper  → GPIO1_D3   linux  59  pin 22. Il pinout non stampa I2C/SPI/UART.
+//   RTC I2C      → SDA GPIO1_C6 (54, pin 12, solo PWM10), SCL GPIO0_A3 (3, pin 38,
+//                  nessuna funzione sul pinout). Bitbang. Non più SPI0 C1/C2.
 // =====================================================================
 #define CORE_GPIO_D1_WAKE         52
 #define CORE_GPIO_D2_END          58
-#define CORE_GPIO_TPL_DONE        48
+#define CORE_GPIO_TPL_DONE        4
 #define CORE_GPIO_MODE_CFG        53
 #define CORE_GPIO_STATUS_LED      118
 #define CORE_GPIO_RTC_SQW         55
@@ -40,7 +42,7 @@
 #if defined(__cplusplus)
 static_assert(CORE_GPIO_D1_WAKE  == 52, "PIN: D1 = linux 52 (GPIO1_C4)");
 static_assert(CORE_GPIO_D2_END   == 58, "PIN: D2 = linux 58 (GPIO1_D2)");
-static_assert(CORE_GPIO_TPL_DONE == 48, "PIN: DONE = linux 48 (GPIO1_C0)");
+static_assert(CORE_GPIO_TPL_DONE == 4, "PIN: DONE = linux 4 (GPIO0_A4, pin 40, solo PWM)");
 static_assert(CORE_GPIO_MODE_CFG == 53, "PIN: MODE = linux 53 (GPIO1_C5)");
 static_assert(CORE_GPIO_STATUS_LED == 118, "PIN: LED = linux 118 (GPIO3_C6 USER)");
 static_assert(CORE_GPIO_RTC_SQW == 55, "PIN: SQW = linux 55 (GPIO1_C7)");
@@ -192,10 +194,10 @@ static inline uint16_t core_video_align16(uint16_t v, uint16_t native) {
 #define CORE_CSI_I2C_SCL    54
 #define CORE_CSI_I2C_SDA    55
 
-/* Hardware I2C4_M1 is C2+C3. User SDA is C1 — use i2c-gpio, not I2C4. */
+/* Bitbang. Non SPI0 (C1/C2) e non I2C4 della camera (GPIO3_C7/D0). */
 #define CORE_RTC_I2C_PORT_NUM  (-1)
-#define CORE_RTC_I2C_SDA       49
-#define CORE_RTC_I2C_SCL       50
+#define CORE_RTC_I2C_SDA       54
+#define CORE_RTC_I2C_SCL       3
 #define CORE_RTC_I2C_ADDR      0x68
 #define CORE_RTC_EEPROM_ADDR   0x57
 #define CORE_RTC_I2C_HZ        100000
