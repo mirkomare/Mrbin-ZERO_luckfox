@@ -18,13 +18,15 @@ Non si usano:
 - reset camera GPIO3_C5 e I2C4_M2 GPIO3_C7 / GPIO3_D0 (bus IMX415);
 - GPIO1_B2 / GPIO1_B3: console di debug, il DTS lascia `fiq_debugger` acceso.
 
-Un pin del connettore si usa solo se il pinout ufficiale Luckfox Pico Zero non ci stampa I2C, SPI, UART, SDIO, eMMC o BOOT. PWM non è in quella lista. Sul connettore da 40 pin i GPIO così fatti sono cinque: pin 12 (GPIO1_C6, solo PWM10), pin 22 (GPIO1_D3, nessuna funzione), pin 36 (GPIO1_C7, solo PWM11), pin 38 (GPIO0_A3, nessuna funzione), pin 40 (GPIO0_A4, solo PWM1). DEMO e SQW occupano già pin 22 e pin 36. Restano tre pin puliti: lì vanno DONE e l’RTC. Non c’è un quarto.
+Un pin del connettore si usa solo se il pinout ufficiale Luckfox Pico Zero non ci stampa I2C, SPI, UART, SDIO, eMMC o BOOT. PWM non è in quella lista. Sul connettore da 40 pin i GPIO così fatti sono cinque: pin 12 (GPIO1_C6, solo PWM10), pin 22 (GPIO1_D3, nessuna funzione), pin 36 (GPIO1_C7, solo PWM11), pin 38 (GPIO0_A3, nessuna funzione), pin 40 (GPIO0_A4, solo PWM1). Sono già tutti occupati: DEMO 22, SQW 36, DONE 40, RTC SDA 12, RTC SCL 38. Non resta un pin il cui pinout stampa solo PWM.
+
+Il LED esterno, quello che sulla Pro/Max era GPIO1_B2 (header 1, linux 42), va quindi sul pin meno scomodo ancora libero: pin 21, GPIO1_C3, linux 51. Il pinout ci stampa SPI0_MISO_M0 e PWM6_M2. SPI0 è `status = "disabled"` nel DTS della Zero. Non è WiFi SDIO, reset radio, UART Bluetooth, eMMC, BOOT, TF, CSI né la UART di debug. Il USER LED di scheda (GPIO3_C6, linux 118) non è questo LED: non esce sul connettore.
 
 ## Righe importanti
 
 | Funzione | Prima sulla Zero | Adesso | Perché |
 |---|---|---|---|
-| LED | GPIO3_C6, linux 118, USER LED | invariato | Non è un pin del connettore. |
+| LED esterno | GPIO3_C6, linux 118, USER LED di scheda | GPIO1_C3, linux 51, pin 21 | Non resta un GPIO pulito né un pin solo PWM. Il pinout stampa SPI0_MISO e PWM6. SPI0 è spento. Sulla Pro/Max era GPIO1_B2, header 1, linux 42. |
 | DONE | GPIO1_C0, linux 48, pin 24, SPI0_CS0 | GPIO0_A4, linux 4, pin 40 | Il pinout stampa solo PWM1_M0. Niente I2C, SPI o UART. |
 | RTC SDA | GPIO1_C1, linux 49, pin 23, SPI0_CLK | GPIO1_C6, linux 54, pin 12 | Il pinout stampa solo PWM10_M1. |
 | RTC SCL | GPIO1_C2, linux 50, pin 19, SPI0_MOSI | GPIO0_A3, linux 3, pin 38 | Il pinout non stampa nessuna funzione alternativa. |

@@ -20,9 +20,11 @@
 };
 
 &work_led {
+	label = "mrbin:status";
 	linux,default-trigger = "none";
 	default-state = "off";
-	gpios = <&gpio3 RK_PC6 GPIO_ACTIVE_HIGH>;
+	/* Pin 21. GPIO3_C6 resta il USER LED di scheda e non è questo LED. */
+	gpios = <&gpio1 RK_PC3 GPIO_ACTIVE_HIGH>;
 };
 
 &spi0 {
@@ -33,7 +35,8 @@
 	mrbin {
 		mrbin_header: mrbin-header {
 			rockchip,pins =
-				<3 RK_PC6 RK_FUNC_GPIO &pcfg_pull_none>,
+				/* LED esterno, pin 21, GPIO1_C3. Non il USER LED GPIO3_C6. */
+				<1 RK_PC3 RK_FUNC_GPIO &pcfg_pull_none>,
 				<1 RK_PC7 RK_FUNC_GPIO &pcfg_pull_up>,
 				<1 RK_PC5 RK_FUNC_GPIO &pcfg_pull_up>,
 				<1 RK_PC4 RK_FUNC_GPIO &pcfg_pull_up>,

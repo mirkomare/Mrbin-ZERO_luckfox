@@ -14,7 +14,9 @@
 // UART BT GPIO1_A3/A4, eMMC GPIO4_A/B, strap BOOT SARADC_IN0 GPIO4_C0 (144),
 // TF SDMMC1 GPIO2_A*. CSI IMX415: reset GPIO3_C5, I2C4_M2 GPIO3_C7/D0.
 //
-//   LED          → GPIO3_C6   linux 118  USER LED di scheda (non GPIO1_B2 / UART debug)
+//   LED esterno  → GPIO1_C3   linux  51  pin 21. Non resta un GPIO pulito né un pin
+//                              solo PWM. Il pinout stampa SPI0_MISO e PWM6; SPI0 è spento.
+//                              Il USER LED GPIO3_C6 (118) resta sulla scheda e non si usa.
 //   SQW          → GPIO1_C7   linux  55  pin 36, il pinout stampa solo PWM11
 //   MODE         → GPIO1_C5   linux  53  pin 32, UART4_TX (non I2C1). Resta: i GPIO
 //                              senza bus sul connettore sono già usati.
@@ -30,7 +32,7 @@
 #define CORE_GPIO_D2_END          58
 #define CORE_GPIO_TPL_DONE        4
 #define CORE_GPIO_MODE_CFG        53
-#define CORE_GPIO_STATUS_LED      118
+#define CORE_GPIO_STATUS_LED      51
 #define CORE_GPIO_RTC_SQW         55
 #define CORE_GPIO_MODEM_PWR       73
 #define CORE_GPIO_DEMO            59
@@ -44,7 +46,7 @@ static_assert(CORE_GPIO_D1_WAKE  == 52, "PIN: D1 = linux 52 (GPIO1_C4)");
 static_assert(CORE_GPIO_D2_END   == 58, "PIN: D2 = linux 58 (GPIO1_D2)");
 static_assert(CORE_GPIO_TPL_DONE == 4, "PIN: DONE = linux 4 (GPIO0_A4, pin 40, solo PWM)");
 static_assert(CORE_GPIO_MODE_CFG == 53, "PIN: MODE = linux 53 (GPIO1_C5)");
-static_assert(CORE_GPIO_STATUS_LED == 118, "PIN: LED = linux 118 (GPIO3_C6 USER)");
+static_assert(CORE_GPIO_STATUS_LED == 51, "PIN: LED esterno = linux 51 (GPIO1_C3, pin 21)");
 static_assert(CORE_GPIO_RTC_SQW == 55, "PIN: SQW = linux 55 (GPIO1_C7)");
 static_assert(CORE_GPIO_MODEM_PWR == 73, "PIN: MODEM = linux 73 (GPIO2_B1)");
 static_assert(CORE_GPIO_DEMO == 59, "PIN: DEMO = linux 59 (GPIO1_D3, non GPIO2_A0 SD)");
