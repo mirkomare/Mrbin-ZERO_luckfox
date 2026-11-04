@@ -6,9 +6,9 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 ## [0.9.8-zero] - 2026-11-04 — DEMO spenta, LED, file senza RTSP, video al tetto dell'ISP
 
-**Data/ora release:** 2026-11-04 19:36:36 +0100
+**Data/ora release:** 2026-11-04 19:37:02 +0100
 **Subversion:** `3` (serie **0.9.8-zero**, da `2` / 0.9.7-zero)
-**Commit:** `PLACEHOLDER`
+**Commit:** `3d84086221e50541199dcca8e80ae7798cac0d4a`
 **Stato:** Stable (patch). Sorgente. `out/` e l’immagine non sono nel commit. La scheda in sessione ha già questo core e i moduli ISP, senza reflash.
 
 ### Aggiunto
