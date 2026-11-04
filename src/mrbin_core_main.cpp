@@ -571,11 +571,11 @@ extern "C" void app_main(void) {
         ESP_LOGW(TAG, "FORCE_CONFIG — skip SQW/PIR routing, avvio CONFIG con Stato HW");
         boot_rtc_programming_full();
         ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());
-        core_isp_cal_init();
+        core_video_detect_sensor();
+        core_isp_cal_bind_sensor();
         core_alarm_schedule_init();
         core_video_set_bayer_mode(g_settings.video_bayer_mode);
         core_video_set_flip(g_settings.video_vflip, g_settings.video_hflip);
-        core_video_detect_sensor();
         if (!core_status_led_init()) {
             ESP_LOGW(TAG, "LED GPIO%d non disponibile — feedback visivo disabilitato",
                      CORE_GPIO_STATUS_LED);
@@ -599,7 +599,8 @@ extern "C" void app_main(void) {
         core_demo_latch_from_boot(true);
         boot_rtc_programming_full();
         ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());
-        core_isp_cal_init();
+        core_video_detect_sensor();
+        core_isp_cal_bind_sensor();
         core_alarm_schedule_init();
         core_video_set_bayer_mode(g_settings.video_bayer_mode);
         core_video_set_flip(g_settings.video_vflip, g_settings.video_hflip);
@@ -624,7 +625,8 @@ extern "C" void app_main(void) {
         core_gpio_rtc_programming_begin();
         boot_rtc_programming_full();
         ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());
-        core_isp_cal_init();
+        core_video_detect_sensor();
+        core_isp_cal_bind_sensor();
         core_alarm_schedule_init();
         core_video_set_bayer_mode(g_settings.video_bayer_mode);
         core_video_set_flip(g_settings.video_vflip, g_settings.video_hflip);
@@ -655,7 +657,6 @@ extern "C" void app_main(void) {
     boot_rtc_recording_only();
     log_wake_source(false, false);
     ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());
-    core_isp_cal_init();
     core_video_set_bayer_mode(g_settings.video_bayer_mode);
     core_video_set_flip(g_settings.video_vflip, g_settings.video_hflip);
     if (!core_status_led_init()) {

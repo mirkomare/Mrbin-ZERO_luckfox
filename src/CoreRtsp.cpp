@@ -1,7 +1,9 @@
 #include "CoreRtsp.h"
 
 #include "CoreConfig.h"
+#include "CoreDemo.h"
 #include "CoreIspCal.h"
+#include "CoreLive.h"
 #include "CoreVideo.h"
 
 #include "hal_capture.h"
@@ -56,6 +58,7 @@ static int s_playing = 0;
 static int s_opening = 0;
 static int s_pipe_up = 0;
 static int s_gen = 1;
+static int s_sub_gen = 1;
 static int s_applied = 0;
 static int s_port = RTSP_PORT_PRIMARY;
 static int s_started = 0;
@@ -66,8 +69,9 @@ typedef struct {
     int fd;
     int udp;
     int playing;
-    int tcp_rtp;
     int dead;
+    int tcp_rtp;
+    int ch;
     uint16_t seq;
     uint32_t ts;
     uint32_t gen;
@@ -181,7 +185,24 @@ static int path_ok(const char *msg) {
     if (*sp == '*') {
         return 1;
     }
-    return strstr(sp, "live") != nullptr || strstr(sp, "track") != nullptr;
+    return strstr(sp, "ch1") != nullptr || strstr(sp, "ch2") != nullptr ||
+           strstr(sp, "live") != nullptr || strstr(sp, "track") != nullptr;
+}
+
+static int request_channel(const char *msg) {
+    const char *sp = strchr(msg, ' ');
+    if (!sp) {
+        return 1;
+    }
+    sp++;
+    if (strncmp(sp, "rtsp://", 7) == 0) {
+        const char *slash = strchr(sp + 7, '/');
+        sp = slash ? slash : sp;
+    }
+    if (strstr(sp, "ch2") != nullptr) {
+        return 2;
+    }
+    return 1;
 }
 
 static void reply(rtsp_client_t *c, int code, const char *reason, const char *extra, const char *body) {
@@ -245,6 +266,9 @@ static void on_request(rtsp_client_t *c) {
         return;
     }
     if (strcmp(method, "DESCRIBE") == 0) {
+        int ch = request_channel(msg);
+        c->ch = ch;
+        const char *base = (ch == 2) ? "ch2" : (strstr(msg, "ch1") ? "ch1" : "live");
         char sdp[512];
         int slen = snprintf(sdp, sizeof(sdp),
                             "v=0\r\n"
@@ -256,9 +280,9 @@ static void on_request(rtsp_client_t *c) {
                             "a=fmtp:96 packetization-mode=1\r\n"
                             "a=control:track1\r\n");
         snprintf(extra, sizeof(extra),
-                 "Content-Base: rtsp://0.0.0.0:%d/live/\r\n"
+                 "Content-Base: rtsp://0.0.0.0:%d/%s/\r\n"
                  "Content-Type: application/sdp\r\n",
-                 s_port);
+                 s_port, base);
         if (slen < 0) {
             slen = 0;
             sdp[0] = 0;
@@ -267,6 +291,7 @@ static void on_request(rtsp_client_t *c) {
         return;
     }
     if (strcmp(method, "SETUP") == 0) {
+        c->ch = request_channel(msg);
         char transport[256];
         hdr_value(msg, "Transport", transport, sizeof(transport));
         int tcp = strstr(transport, "TCP") != nullptr;
@@ -311,6 +336,12 @@ static void on_request(rtsp_client_t *c) {
         return;
     }
     if (strcmp(method, "PLAY") == 0) {
+        c->ch = request_channel(msg);
+        if (!s_always) {
+            reply(c, 453, "Not Enough Bandwidth", nullptr, nullptr);
+            ESP_LOGI(TAG, "PLAY rifiutato: RTSP spento");
+            return;
+        }
         lock_mu();
         if (!c->playing && !c->dead) {
             c->playing = 1;
@@ -321,10 +352,10 @@ static void on_request(rtsp_client_t *c) {
         unlock_mu();
         snprintf(extra, sizeof(extra),
                  "Session: 1\r\n"
-                 "RTP-Info: url=rtsp://0.0.0.0:%d/live/track1;seq=%u;rtptime=%u\r\n",
-                 s_port, (unsigned)seq, (unsigned)ts);
+                 "RTP-Info: url=rtsp://0.0.0.0:%d/%s/track1;seq=%u;rtptime=%u\r\n",
+                 s_port, c->ch == 2 ? "ch2" : "live", (unsigned)seq, (unsigned)ts);
         reply(c, 200, "OK", extra, nullptr);
-        ESP_LOGI(TAG, "Client in play (%s)", c->tcp_rtp ? "tcp" : "udp");
+        ESP_LOGI(TAG, "Client in play ch%d (%s)", c->ch, c->tcp_rtp ? "tcp" : "udp");
         return;
     }
     if (strcmp(method, "TEARDOWN") == 0) {
@@ -588,7 +619,7 @@ static void send_nal(rtsp_client_t *c, const uint8_t *nal, int n, int marker) {
     }
 }
 
-static void broadcast_frame(const uint8_t *data, int n, uint32_t step) {
+static void broadcast_frame(const uint8_t *data, int n, uint32_t step, int channel) {
     if (!data || n <= 4 || !s_send_mu) {
         return;
     }
@@ -596,7 +627,8 @@ static void broadcast_frame(const uint8_t *data, int n, uint32_t step) {
     int use[RTSP_MAX_CLIENTS];
     lock_mu();
     for (int i = 0; i < RTSP_MAX_CLIENTS; ++i) {
-        use[i] = s_cli[i].playing && !s_cli[i].dead && s_cli[i].fd >= 0;
+        use[i] = s_always && s_cli[i].playing && !s_cli[i].dead && s_cli[i].fd >= 0 &&
+                 s_cli[i].ch == channel;
         if (use[i]) {
             snap[i] = s_cli[i];
         }
@@ -667,7 +699,9 @@ static void broadcast_frame(const uint8_t *data, int n, uint32_t step) {
 }
 
 static int pipe_wanted(void) {
-    return s_always || s_playing > 0 || s_rec;
+    /* Un client non accende l'encoder. Il pulsante accende entrambi i canali.
+     * La registrazione tiene il canale 1 anche con RTSP spento. */
+    return s_always || s_rec;
 }
 
 static int pipe_blocked(void) {
@@ -692,7 +726,7 @@ static void pipe_close(void) {
         s_vsrc = nullptr;
     }
     esp_video_enc_unregister_default();
-    if (!hal_preview_running()) {
+    if (!hal_preview_running() && !hal_sub_running() && !hal_live_running()) {
         core_video_deinit();
         core_video_isp_stop_3a();
         hal_mark_3a_down();
@@ -787,7 +821,7 @@ static int pipe_open(void) {
     core_video_reapply_flip();
     core_video_isp_live_after_vi();
     (void)core_isp_cal_apply_active();
-    ESP_LOGI(TAG, "Streamer H.264 %ux%u@%u su rtsp://0.0.0.0:%d/live",
+    ESP_LOGI(TAG, "Canale 1 H.264 %ux%u@%u su rtsp://0.0.0.0:%d/ch1",
              (unsigned)cfg.video_width, (unsigned)cfg.video_height, (unsigned)cfg.video_fps, s_port);
     return 1;
 }
@@ -938,12 +972,99 @@ static void pipe_task(void *arg) {
         if (rec) {
             rec_offer(frame.data, frame.size, frame.pts);
         }
-        broadcast_frame(frame.data, frame.size, step);
+        if (s_always) {
+            broadcast_frame(frame.data, frame.size, step, 1);
+        }
         esp_capture_sink_release_frame(s_sink, &frame);
     }
     if (open_local) {
         pipe_close();
     }
+    vTaskDelete(nullptr);
+}
+
+static void sub_stop_local(int *open_local) {
+    if (open_local && *open_local) {
+        hal_sub_stop();
+        *open_local = 0;
+    }
+}
+
+static void sub_task(void *arg) {
+    (void)arg;
+    int open_local = 0;
+    int sub_applied = 0;
+    while (s_run) {
+        if (core_rec_fast_requested()) {
+            sub_stop_local(&open_local);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        core_settings_t cfg;
+        int gen = 0;
+        int want = 0;
+        int main_up = 0;
+        lock_mu();
+        want = s_always && s_hold == 0;
+        main_up = s_pipe_up && !s_opening;
+        gen = s_sub_gen;
+        cfg = s_cfg;
+        unlock_mu();
+        if (!want || !main_up) {
+            /* Il canale 1 (anche 8 MP) deve allocare la CMA prima del selfpath.
+             * Se il canale 2 parte prima, il VENC grande fallisce e il teardown
+             * blocca il processo. */
+            sub_stop_local(&open_local);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (hal_preview_running()) {
+            sub_stop_local(&open_local);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        uint16_t w = cfg.ch2_width ? cfg.ch2_width : 1280;
+        uint16_t h = cfg.ch2_height ? cfg.ch2_height : 720;
+        uint8_t fps = cfg.ch2_fps ? cfg.ch2_fps : 15;
+        if (!core_settings_video_valid(w, h, fps)) {
+            w = 1280;
+            h = 720;
+            fps = 15;
+        }
+        if (!open_local || sub_applied != gen) {
+            sub_stop_local(&open_local);
+            uint32_t br = core_settings_bitrate_for(w, h, fps);
+            if (hal_sub_start((int)w, (int)h, (int)fps, br) != 0) {
+                if (!(w == 640 && h == 360)) {
+                    ESP_LOGW(TAG, "Canale 2 %ux%u non parte, riprovo 640x360",
+                             (unsigned)w, (unsigned)h);
+                    br = core_settings_bitrate_for(640, 360, fps);
+                    if (hal_sub_start(640, 360, (int)fps, br) == 0) {
+                        open_local = 1;
+                        sub_applied = gen;
+                        ESP_LOGI(TAG, "Canale 2 RTSP 640x360@%u", (unsigned)fps);
+                        continue;
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                continue;
+            }
+            open_local = 1;
+            sub_applied = gen;
+            ESP_LOGI(TAG, "Canale 2 RTSP %ux%u@%u", (unsigned)w, (unsigned)h, (unsigned)fps);
+            continue;
+        }
+        uint8_t *data = nullptr;
+        int n = 0;
+        if (hal_sub_acquire(&data, &n, 200) != 0 || !data || n <= 0) {
+            free(data);
+            continue;
+        }
+        uint32_t step = fps > 0 ? (90000u / fps) : 6000u;
+        broadcast_frame(data, n, step, 2);
+        free(data);
+    }
+    sub_stop_local(&open_local);
     vTaskDelete(nullptr);
 }
 
@@ -966,6 +1087,20 @@ static int listen_on(int port) {
     return fd;
 }
 #endif /* !_WIN32 */
+
+void core_rtsp_url_ch(int ch, char *out, size_t out_len) {
+    if (!out || out_len == 0) {
+        return;
+    }
+    const char *path = (ch == 2) ? "ch2" : "ch1";
+#ifndef _WIN32
+    char ip[64];
+    local_ip(ip, sizeof(ip));
+    snprintf(out, out_len, "rtsp://%s:%d/%s", ip, s_port, path);
+#else
+    snprintf(out, out_len, "rtsp://127.0.0.1:%d/%s", RTSP_PORT_PRIMARY, path);
+#endif
+}
 
 void core_rtsp_url(char *out, size_t out_len) {
     if (!out || out_len == 0) {
@@ -1167,10 +1302,15 @@ static void remember(const core_settings_t *settings) {
 #endif
     int changed = s_cfg.video_width != next.video_width || s_cfg.video_height != next.video_height ||
                   s_cfg.video_fps != next.video_fps;
+    int ch2_changed = s_cfg.ch2_width != next.ch2_width || s_cfg.ch2_height != next.ch2_height ||
+                      s_cfg.ch2_fps != next.ch2_fps;
     s_cfg = next;
     s_always = next.rtsp_always ? 1 : 0;
     if (changed) {
         s_gen++;
+    }
+    if (ch2_changed) {
+        s_sub_gen++;
     }
 #ifndef _WIN32
     unlock_mu();
@@ -1181,9 +1321,12 @@ void core_rtsp_apply(const core_settings_t *settings) {
     remember(settings);
 #ifndef _WIN32
     if (s_always) {
-        ESP_LOGI(TAG, "Streamer sempre acceso");
+        if (!core_demo_is_active() && core_live_is_running()) {
+            core_live_force_release();
+        }
+        ESP_LOGI(TAG, "RTSP acceso: canale 1 e canale 2");
     } else {
-        ESP_LOGI(TAG, "Streamer solo con un client collegato");
+        ESP_LOGI(TAG, "RTSP spento");
     }
 #endif
 }
@@ -1219,9 +1362,10 @@ void core_rtsp_start(const core_settings_t *settings) {
     s_run = 1;
     xTaskCreate(accept_task, "rtsp_acc", 8192, nullptr, 3, nullptr);
     xTaskCreate(pipe_task, "rtsp_pipe", 32768, nullptr, 4, nullptr);
+    xTaskCreate(sub_task, "rtsp_sub", 16384, nullptr, 4, nullptr);
     char url[80];
-    core_rtsp_url(url, sizeof(url));
-    ESP_LOGI(TAG, "RTSP in ascolto: %s (%s)", url, s_always ? "sempre acceso" : "su richiesta");
+    core_rtsp_url_ch(1, url, sizeof(url));
+    ESP_LOGI(TAG, "RTSP in ascolto: %s e /ch2 (%s)", url, s_always ? "acceso" : "spento");
 #else
     (void)settings;
 #endif

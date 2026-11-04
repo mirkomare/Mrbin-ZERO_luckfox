@@ -175,11 +175,17 @@ static bool hal_sd_mount_dev_rw(const char *dev, const char *mp) {
     return try_mount_dev(dev, mp) && !hal_sd_mount_is_readonly(mp);
 }
 
+static bool dev_is_system_emmc(const char *dev);
+static bool pick_sd_dev(char *out, size_t len);
+
 bool hal_sd_repair_vfat(const char *mp) {
     mp = sd_mount_point(mp);
     char dev[128];
-    if (!path_mount_device(mp, dev, sizeof(dev))) {
-        snprintf(dev, sizeof(dev), "/dev/mmcblk1p1");
+    if (!path_mount_device(mp, dev, sizeof(dev)) && !pick_sd_dev(dev, sizeof(dev))) {
+        return false;
+    }
+    if (dev_is_system_emmc(dev)) {
+        return false;
     }
     if (path_is_mounted(mp)) {
         umount2(mp, MNT_DETACH);
@@ -195,8 +201,11 @@ bool hal_sd_format_vfat(const char *mp, const char *dev_hint) {
     char dev[128];
     if (dev_hint && dev_hint[0]) {
         snprintf(dev, sizeof(dev), "%s", dev_hint);
-    } else if (!path_mount_device(mp, dev, sizeof(dev))) {
-        snprintf(dev, sizeof(dev), "/dev/mmcblk1p1");
+    } else if (!path_mount_device(mp, dev, sizeof(dev)) && !pick_sd_dev(dev, sizeof(dev))) {
+        return false;
+    }
+    if (dev_is_system_emmc(dev)) {
+        return false;
     }
     if (path_is_mounted(mp)) {
         umount2(mp, MNT_DETACH);
@@ -244,6 +253,46 @@ bool hal_sd_remount_rw(const char *mp) {
     return hal_sd_repair_vfat(mp);
 }
 
+/* Pico Zero eMMC: mmcblk0 è il disco di sistema. La SD è mmcblk2
+ * (il kernel la monta già su /mnt/sdcard). mmcblk1 è il WiFi SDIO. */
+static bool dev_is_system_emmc(const char *dev) {
+    return dev && strncmp(dev, "/dev/mmcblk0", 13) == 0;
+}
+
+static bool pick_sd_dev(char *out, size_t len) {
+    static const char *cands[] = {
+        "/dev/mmcblk2p1", "/dev/mmcblk1p1", "/dev/mmcblk2", "/dev/mmcblk1", nullptr
+    };
+    for (int i = 0; cands[i]; ++i) {
+        if (dev_is_system_emmc(cands[i])) continue;
+        if (access(cands[i], F_OK) == 0) {
+            snprintf(out, len, "%s", cands[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool bind_existing_vfat(const char *mp) {
+    FILE *fp = fopen("/proc/mounts", "r");
+    if (!fp) return false;
+    char dev[128], dir[160], fstype[32], rest[256];
+    char src[160] = {0};
+    while (fscanf(fp, "%127s %159s %31s %255[^\n]", dev, dir, fstype, rest) == 4) {
+        if (strcmp(dir, mp) == 0) continue;
+        if (strstr(dev, "mmcblk") == nullptr) continue;
+        if (dev_is_system_emmc(dev)) continue;
+        if (strcmp(fstype, "vfat") != 0 && strcmp(fstype, "exfat") != 0) continue;
+        snprintf(src, sizeof(src), "%s", dir);
+        break;
+    }
+    fclose(fp);
+    if (!src[0]) return false;
+    mkdir(mp, 0755);
+    if (mount(src, mp, nullptr, MS_BIND, nullptr) != 0) return false;
+    return path_is_mounted(mp);
+}
+
 static bool ensure_mounted(const char *mp) {
     if (path_is_mounted(mp)) {
         if (hal_sd_mount_is_readonly(mp)) {
@@ -255,12 +304,13 @@ static bool ensure_mounted(const char *mp) {
     if (strcmp(mp, "/sdcard") != 0) {
         mkdir("/sdcard", 0755);
     }
+    if (bind_existing_vfat(mp)) {
+        return true;
+    }
     release_sdmmc_cmd();
-    static const char *devs[] = {
-        "/dev/mmcblk1p1", "/dev/mmcblk0p1", "/dev/mmcblk1", "/dev/mmcblk0", nullptr
-    };
-    for (int i = 0; devs[i]; ++i) {
-        if (try_mount_dev(devs[i], mp) && path_is_mounted(mp)) return true;
+    char dev[128];
+    if (pick_sd_dev(dev, sizeof(dev)) && try_mount_dev(dev, mp) && path_is_mounted(mp)) {
+        return true;
     }
     return path_is_mounted(mp);
 }

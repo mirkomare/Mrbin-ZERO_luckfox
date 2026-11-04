@@ -44,6 +44,8 @@ typedef struct {
 } core_isp_cal_t;
 
 void core_isp_cal_init(void);
+/* Dopo core_video_detect_sensor(): ricarica la calibrazione di quella camera. */
+void core_isp_cal_bind_sensor(void);
 const core_isp_cal_t *core_isp_cal_get(void);
 
 void core_isp_cal_set_defaults(core_isp_cal_t *cal);

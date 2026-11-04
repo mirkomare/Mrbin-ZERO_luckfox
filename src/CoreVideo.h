@@ -31,6 +31,10 @@ bool core_video_get_vflip(void);
 bool core_video_get_hflip(void);
 // True se l'ultimo apply ha scritto HFLIP/VFLIP sul subdev SC3336 (o video0).
 bool core_video_flip_hw_applied(void);
+/* Online wrap (H.264 sopra 1080p) non accetta enMirror: 1 = gira il sensore,
+ * 0 = azzera il sensore e lascia il giro all'encoder. */
+void core_video_orient_via_sensor(int via_sensor);
+int core_video_orient_on_sensor(void);
 
 // Riapplica l'orientamento corrente al sensore (serve dopo esp_capture_start,
 // perché VIDIOC_S_FMT ricarica la tabella registri OV5647 e azzera flip/mirror).

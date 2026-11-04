@@ -219,16 +219,10 @@ int core_video_device_fd(void) {
     return s_video_fd;
 }
 
+static bool s_orient_on_sensor = false;
+
 // SC3336: V4L2_CID_HFLIP/VFLIP on the sensor subdev. video0 (rkcif) has no flip.
-static void core_video_apply_flip(void) {
-#ifdef LUCKFOX_RKMPI
-    /* VENC enMirror already turns the picture. The IMX415 subdev accepts
-     * the same flags, so doing both cancels out and the checkbox looks unsaved. */
-    s_flip_hw_ok = true;
-    ESP_LOGI(TAG, "Orientamento encoder: capovolgi=%d specchia=%d",
-             (int)s_vflip, (int)s_hflip);
-    return;
-#endif
+static void core_video_write_sensor_flip(bool vflip, bool hflip) {
     s_flip_hw_ok = false;
     char devname[80] = {0};
     int fd = core_video_open_sensor_flip_fd(devname, sizeof(devname));
@@ -242,12 +236,12 @@ static void core_video_apply_flip(void) {
         ESP_LOGW(TAG, "Flip: nessun subdev SC3336 / %s", CORE_VIDEO_DEV_NAME);
         return;
     }
-    const bool ok_v = core_video_s_ctrl(fd, V4L2_CID_VFLIP, s_vflip ? 1 : 0);
-    const bool ok_h = core_video_s_ctrl(fd, V4L2_CID_HFLIP, s_hflip ? 1 : 0);
+    const bool ok_v = core_video_s_ctrl(fd, V4L2_CID_VFLIP, vflip ? 1 : 0);
+    const bool ok_h = core_video_s_ctrl(fd, V4L2_CID_HFLIP, hflip ? 1 : 0);
     s_flip_hw_ok = ok_v && ok_h;
     if (s_flip_hw_ok) {
         ESP_LOGI(TAG, "Orientamento %s: capovolgi=%d specchia=%d",
-                 devname, (int)s_vflip, (int)s_hflip);
+                 devname, (int)vflip, (int)hflip);
     } else {
         ESP_LOGW(TAG, "Flip su %s fallito v=%d h=%d errno=%d",
                  devname, (int)ok_v, (int)ok_h, errno);
@@ -255,6 +249,72 @@ static void core_video_apply_flip(void) {
     if (own) {
         close(fd);
     }
+}
+
+/* Encoder enMirror and a leftover IMX415 V4L2 flip cancel each other.
+ * Clear the subdev only when it is not already 0. */
+static void core_video_clear_sensor_flip(void) {
+#if !defined(_WIN32)
+    char devname[80] = {0};
+    int fd = core_video_open_sensor_flip_fd(devname, sizeof(devname));
+    if (fd < 0) {
+        return;
+    }
+    struct core_v4l2_ctrl gv;
+    struct core_v4l2_ctrl gh;
+    memset(&gv, 0, sizeof(gv));
+    memset(&gh, 0, sizeof(gh));
+    gv.id = V4L2_CID_VFLIP;
+    gh.id = V4L2_CID_HFLIP;
+    const int have_v = ioctl(fd, VIDIOC_G_CTRL, &gv) == 0;
+    const int have_h = ioctl(fd, VIDIOC_G_CTRL, &gh) == 0;
+    const int leftover = (have_v && gv.value) || (have_h && gh.value);
+    if (leftover) {
+        const bool ok_v = core_video_s_ctrl(fd, V4L2_CID_VFLIP, 0);
+        const bool ok_h = core_video_s_ctrl(fd, V4L2_CID_HFLIP, 0);
+        ESP_LOGI(TAG, "Sensore %s flip azzerato (era v=%d h=%d) ok=%d",
+                 devname, have_v ? (int)gv.value : -1, have_h ? (int)gh.value : -1,
+                 (ok_v && ok_h) ? 1 : 0);
+    }
+    close(fd);
+#else
+    (void)0;
+#endif
+}
+
+static void core_video_apply_flip(void) {
+#ifdef LUCKFOX_RKMPI
+    /* MJPEG enMirror does not change this IMX415 preview, and VI mirror
+     * is global but did not show up in the JPEG. The sensor control does.
+     * The encoder stays MIRROR_NONE so the two cannot cancel. */
+    s_orient_on_sensor = true;
+    core_video_write_sensor_flip(s_vflip, s_hflip);
+#else
+    core_video_write_sensor_flip(s_vflip, s_hflip);
+#endif
+}
+
+void core_video_orient_via_sensor(int via_sensor) {
+#ifdef LUCKFOX_RKMPI
+    if (via_sensor) {
+        s_orient_on_sensor = true;
+        core_video_write_sensor_flip(s_vflip, s_hflip);
+        return;
+    }
+    if (s_orient_on_sensor) {
+        core_video_write_sensor_flip(false, false);
+        s_orient_on_sensor = false;
+    } else {
+        core_video_clear_sensor_flip();
+    }
+    s_flip_hw_ok = true;
+#else
+    (void)via_sensor;
+#endif
+}
+
+int core_video_orient_on_sensor(void) {
+    return s_orient_on_sensor ? 1 : 0;
 }
 
 void core_video_set_flip(bool vflip, bool hflip) {

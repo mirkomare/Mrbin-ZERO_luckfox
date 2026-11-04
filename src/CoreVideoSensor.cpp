@@ -248,6 +248,7 @@ static bool core_video_sysfs_name_has(const char *path, const char *needle) {
 
 static bool core_video_sysfs_is_sensor(const char *needle) {
     static const char *k_paths[] = {
+        "/sys/bus/i2c/devices/4-0037/name",
         "/sys/bus/i2c/devices/4-0030/name",
         "/sys/bus/i2c/devices/4-0036/name",
         "/sys/bus/i2c/devices/4-001a/name",

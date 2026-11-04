@@ -38,6 +38,7 @@ static const char *MJPEG_BOUNDARY = "mrbinframe";
 static const core_settings_t *s_settings = nullptr;
 static bool s_rtsp_held = false;
 static bool s_use_preview = false;
+static bool s_use_bypass = false;
 
 static void live_rtsp_hold(void) {
     if (s_rtsp_held) {
@@ -178,11 +179,11 @@ typedef struct {
 
 bool core_live_start(void) {
 #ifdef LUCKFOX_RKMPI
-    if (core_demo_is_active() && !core_demo_rtsp_view()) {
-        ESP_LOGW(TAG, "Live MJPEG disabilitato in DEMO (motion usa VI luma ch1)");
-        return false;
+    if (s_running && s_use_bypass && hal_live_running()) {
+        s_abort_requested = false;
+        return true;
     }
-    if (s_running && s_use_preview) {
+    if (s_running && s_use_preview && !s_use_bypass && hal_preview_flip_matches()) {
         s_abort_requested = false;
         return true;
     }
@@ -197,8 +198,25 @@ bool core_live_start(void) {
         ESP_LOGE(TAG, "Video init fallita");
         return false;
     }
+    if (s_use_preview && !s_use_bypass) {
+        hal_preview_stop();
+        s_use_preview = false;
+        s_running = false;
+    }
+    if (hal_live_start((int)pw, (int)ph, CORE_LIVE_FPS) == 0) {
+        s_use_bypass = true;
+        s_use_preview = true;
+        s_running = true;
+        ESP_LOGI(TAG, "Live MJPEG bypass %ux%u @ %d fps",
+                 (unsigned)pw, (unsigned)ph, CORE_LIVE_FPS);
+        return true;
+    }
+    ESP_LOGW(TAG, "Bypass non disponibile, live sul selfpath");
+    s_use_bypass = false;
     if (hal_preview_start((int)pw, (int)ph, CORE_LIVE_FPS, 0) != 0) {
         ESP_LOGE(TAG, "Anteprima selfpath non partita");
+        s_use_preview = false;
+        s_running = false;
         return false;
     }
     s_use_preview = true;
@@ -420,9 +438,14 @@ static void wait_3a_gone(uint32_t cap_ms) {
 
 void core_live_stop(void) {
 #ifdef LUCKFOX_RKMPI
-    if (s_use_preview) {
+    if (s_use_preview || s_use_bypass) {
         live_lock();
-        hal_preview_stop();
+        if (s_use_bypass) {
+            hal_live_stop();
+        } else {
+            hal_preview_stop();
+        }
+        s_use_bypass = false;
         s_use_preview = false;
         s_running = false;
         s_streaming = false;
@@ -765,10 +788,12 @@ bool core_live_wait_idle(uint32_t timeout_ms) {
 
 static int live_take(esp_capture_stream_frame_t *frame) {
 #ifdef LUCKFOX_RKMPI
-    if (s_use_preview) {
+    if (s_use_bypass || s_use_preview) {
         uint8_t *p = nullptr;
         int n = 0;
-        if (hal_preview_acquire(&p, &n, 200) != 0 || !p || n <= 0) {
+        const int got = s_use_bypass ? hal_live_acquire(&p, &n, 200)
+                                     : hal_preview_acquire(&p, &n, 200);
+        if (got != 0 || !p || n <= 0) {
             free(p);
             return -1;
         }

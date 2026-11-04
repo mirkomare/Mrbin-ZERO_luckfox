@@ -136,6 +136,13 @@ static volatile int s_mpi_cancel;
 static volatile int s_sys_up;
 static volatile int s_prev_up;
 static volatile int s_prev_luma_only;
+static volatile int s_prev_hf = -1;
+static volatile int s_prev_vf = -1;
+static volatile int s_sub_up;
+static volatile int s_live_up;
+static volatile int s_sub_w;
+static volatile int s_sub_h;
+static volatile int s_sub_fps;
 /* Mainpath left enabled so DEMO luma (ch1) is not stream-off'd on clip end. */
 static volatile int s_main_left_up;
 static volatile int s_3a_up;
@@ -197,6 +204,43 @@ static int rkmpi_keep_to_pipe_fps(int keep_fps, int w, int h) {
  * H.264 uses one VI buffer and the online wrap ring. */
 static int rkmpi_above_1080p(int w, int h) {
     return ((uint32_t)w * (uint32_t)h) > (1920u * 1080u);
+}
+
+/* rkvenc online/wrap rejects enMirror ("online not support mirror") and
+ * then every task times out with a zero-length packet. */
+static void rkmpi_venc_mirror(VENC_CHN_ATTR_S *ea, int online) {
+    (void)online;
+    core_video_orient_via_sensor(1);
+    ea->stVencAttr.enMirror = MIRROR_NONE;
+    ESP_LOGI("hal_cap", "VENC senza mirror (orientamento sul sensore)");
+}
+
+/* MPP default lets QP reach 51. On motion that becomes large moving blocks
+ * until the next IDR. Cap it after CreateChn, before StartRecvFrame. */
+static void rkmpi_h264_limit_qp(VENC_CHN ch, int big) {
+    VENC_RC_PARAM_S p;
+    memset(&p, 0, sizeof(p));
+    (void)RK_MPI_VENC_GetRcParam(ch, &p);
+    const RK_U32 mn = big ? 22U : 18U;
+    const RK_U32 mx = big ? 34U : 32U;
+    p.s32FirstFrameStartQp = mn + 4U;
+    p.stParamH264.u32StepQp = 2;
+    p.stParamH264.u32MinQp = mn;
+    p.stParamH264.u32MaxQp = mx;
+    p.stParamH264.u32MinIQp = mn;
+    p.stParamH264.u32MaxIQp = mx;
+    p.stParamH264.u32FrmMinQp = mn + 1U;
+    p.stParamH264.u32FrmMaxQp = mx;
+    p.stParamH264.u32FrmMinIQp = mn + 1U;
+    p.stParamH264.u32FrmMaxIQp = mx;
+    p.stParamH264.s32DeltIpQp = 2;
+    p.stParamH264.s32MaxReEncodeTimes = 1;
+    const int ret = RK_MPI_VENC_SetRcParam(ch, &p);
+    if (ret != RK_SUCCESS) {
+        ESP_LOGW("hal_cap", "VENC ch%d limite QP fallito ret=0x%x", (int)ch, (unsigned)ret);
+    } else {
+        ESP_LOGI("hal_cap", "VENC ch%d QP %u-%u", (int)ch, (unsigned)mn, (unsigned)mx);
+    }
 }
 
 static int rkmpi_3k_wrap_line(int vir_h) {
@@ -275,11 +319,11 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     memset(&va, 0, sizeof(va));
     /* 24MB CMA. NV12 1080p ~3.1 MB/buf (2 bufs). 2304×1296 is ~4.48 MB and
      * 3840×2160 is ~12.4 MB: two full planes plus VENC return ENOMEM.
-     * H.264 above 1080p uses one VI buf plus the online wrap ring.
-     * MJPEG on that ring encodes a uniform black frame. Preview and JPEG
-     * keep one full buffer and do not arm wrap. */
+     * Above 1080p keep one VI buffer. Online wrap does not deliver frames. */
     const int above_1080 = rkmpi_above_1080p(w, h);
-    const int h264_wrap = above_1080 && !c->mjpeg;
+    /* Online wrap never finishes a picture on this IMX415: rkvenc times out
+     * with vepu_cycle 0 and RTSP stays empty. One full VI buffer encodes. */
+    const int h264_wrap = 0;
     const int scaled_hd = (w >= 1280 || h >= 720);
     va.stIspOpt.u32BufCount = above_1080 ? 1 : (scaled_hd ? 2 : 3);
     va.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
@@ -417,8 +461,8 @@ static int rkmpi_vi_venc_start(cap_t *c) {
         /* A full NV12 plane above 1080p is the alloc
          * mpp_vcodec_chan_setup_hal_bufs rejected. Bitstream only. */
         RK_U32 stream = (RK_U32)w * (RK_U32)h / 2U;
-        if (stream > (1536U * 1024U)) {
-            stream = 1536U * 1024U;
+        if (stream > (2560U * 1024U)) {
+            stream = 2560U * 1024U;
         }
         if (stream < (512U * 1024U)) {
             stream = 512U * 1024U;
@@ -433,15 +477,13 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     if (pipe_flip) {
         ea.stVencAttr.enMirror = MIRROR_NONE;
     } else {
-        const bool h = core_video_get_hflip();
-        const bool v = core_video_get_vflip();
-        ea.stVencAttr.enMirror = (h && v) ? MIRROR_BOTH :
-                                 h ? MIRROR_HORIZONTAL :
-                                 v ? MIRROR_VERTICAL : MIRROR_NONE;
-        ESP_LOGI("hal_cap", "VENC specchia=%d capovolgi=%d", h ? 1 : 0, v ? 1 : 0);
+        rkmpi_venc_mirror(&ea, h264_wrap && wrap_line > 0);
     }
     ret = RK_MPI_VENC_CreateChn(0, &ea);
     if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VENC_CreateChn", ret);
+    if (!c->mjpeg) {
+        rkmpi_h264_limit_qp(0, above_1080);
+    }
     if (h264_wrap) {
         if (wrap_line > 0) {
             VENC_CHN_BUF_WRAP_S vw;
@@ -593,16 +635,10 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
     ea.stVencAttr.u32VirWidth = (RK_U32)(c->vir_w > 0 ? c->vir_w : RKMPI_ALIGN16(w));
     ea.stVencAttr.u32VirHeight = (RK_U32)(c->vir_h > 0 ? c->vir_h : RKMPI_ALIGN16(h));
     ea.stVencAttr.u32StreamBufCnt = 2;
-    {
-        const bool hf = core_video_get_hflip();
-        const bool vf = core_video_get_vflip();
-        ea.stVencAttr.enMirror = (hf && vf) ? MIRROR_BOTH :
-                                 hf ? MIRROR_HORIZONTAL :
-                                 vf ? MIRROR_VERTICAL : MIRROR_NONE;
-    }
+    rkmpi_venc_mirror(&ea, wrap_line > 0);
     if (above_1080) {
         RK_U32 stream = (RK_U32)w * (RK_U32)h / 2U;
-        if (stream > (1536U * 1024U)) stream = 1536U * 1024U;
+        if (stream > (2560U * 1024U)) stream = 2560U * 1024U;
         if (stream < (512U * 1024U)) stream = 512U * 1024U;
         ea.stVencAttr.u32BufSize = stream;
         ea.stGopAttr.u32MaxLtrCount = 0;
@@ -616,6 +652,7 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
         rkmpi_vi_venc_stop(c);
         return -1;
     }
+    rkmpi_h264_limit_qp(0, above_1080);
     if (wrap_line > 0) {
         VENC_CHN_BUF_WRAP_S vw;
         memset(&vw, 0, sizeof(vw));
@@ -685,17 +722,17 @@ static void rkmpi_vi_venc_stop(cap_t *c) {
     /* StopRecvFrame wakes a GetStream poll left behind by a short stop. */
     (void)RK_MPI_VENC_StopRecvFrame(0);
     (void)RK_MPI_VENC_DestroyChn(0);
-    /* DisableChn on mainpath while luma ch1 is streaming does not return.
-     * The 8 s stop-watch then _exit's and the .tmp never gets its moov. */
-    if (s_prev_up) {
+    /* DisableChn on mainpath while another VI channel is streaming
+     * does not return. The 8 s stop-watch then _exit's and the GUI dies. */
+    if (s_prev_up || s_sub_up || s_live_up) {
         s_main_left_up = 1;
         ESP_LOGI("hal_cap", "VENC chiuso, VI mainpath lasciato su");
     } else {
         (void)RK_MPI_VI_DisableChn(0, c->chn);
         s_main_left_up = 0;
     }
-    /* The preview channel shares the VI device and SYS. Leave them up. */
-    if (!s_prev_up) {
+    /* Preview, channel 2 and the local bypass share the VI device and SYS. */
+    if (!s_prev_up && !s_sub_up && !s_live_up) {
         (void)RK_MPI_VI_DisableDev(0);
         (void)RK_MPI_SYS_Exit();
         s_sys_up = 0;
@@ -817,6 +854,26 @@ void hal_capture_request_idr(void) {
     }
 }
 
+static int preview_want_hf(void) {
+    return core_video_get_hflip() ? 1 : 0;
+}
+
+static int preview_want_vf(void) {
+    return core_video_get_vflip() ? 1 : 0;
+}
+
+static void preview_note_mirror(int hf, int vf) {
+    s_prev_hf = hf;
+    s_prev_vf = vf;
+}
+
+int hal_preview_flip_matches(void) {
+    if (!s_prev_up || s_prev_luma_only) {
+        return 0;
+    }
+    return (s_prev_hf == preview_want_hf() && s_prev_vf == preview_want_vf()) ? 1 : 0;
+}
+
 int hal_preview_start(int w, int h, int fps, int vi_user_depth) {
     if (w < 160) {
         w = 160;
@@ -833,13 +890,14 @@ int hal_preview_start(int w, int h, int fps, int vi_user_depth) {
         fps = 15;
     }
     const int luma_only = vi_user_depth > 0;
+    if (s_sub_up) {
+        ESP_LOGI("hal_cap", "Anteprima: fermo il canale 2 per liberare il selfpath");
+        hal_sub_stop();
+    }
     if (s_prev_up) {
-        if (s_prev_luma_only == luma_only) {
+        const int mirror_ok = (s_prev_hf == preview_want_hf() && s_prev_vf == preview_want_vf());
+        if (s_prev_luma_only == luma_only && (mirror_ok || luma_only)) {
             return 0;
-        }
-        if (s_prev_luma_only && core_demo_is_active() && !luma_only) {
-            ESP_LOGW("hal_cap", "Preview DEMO luma attiva — rifiuto swap MJPEG Live");
-            return -1;
         }
         hal_preview_stop_force();
     }
@@ -884,9 +942,11 @@ int hal_preview_start(int w, int h, int fps, int vi_user_depth) {
         ESP_LOGE("hal_cap", "Preview VI EnableChn ret=0x%x", (unsigned)ret);
         return -1;
     }
+    core_video_reapply_flip();
     if (luma_only) {
         s_prev_up = 1;
         s_prev_luma_only = 1;
+        preview_note_mirror(preview_want_hf(), preview_want_vf());
         pthread_mutex_unlock(&s_mpi_mu);
         if (started_3a) {
             core_video_isp_live_after_vi();
@@ -913,13 +973,10 @@ int hal_preview_start(int w, int h, int fps, int vi_user_depth) {
     ea.stVencAttr.u32VirHeight = (RK_U32)h;
     ea.stVencAttr.u32StreamBufCnt = 2;
     ea.stVencAttr.u32BufSize = (RK_U32)w * (RK_U32)h;
-    {
-        const bool hf = core_video_get_hflip();
-        const bool vf = core_video_get_vflip();
-        ea.stVencAttr.enMirror = (hf && vf) ? MIRROR_BOTH :
-                                 hf ? MIRROR_HORIZONTAL :
-                                 vf ? MIRROR_VERTICAL : MIRROR_NONE;
-    }
+    ea.stVencAttr.enMirror = MIRROR_NONE;
+    preview_note_mirror(preview_want_hf(), preview_want_vf());
+    ESP_LOGI("hal_cap", "Preview sensore specchia=%d capovolgi=%d",
+             preview_want_hf(), preview_want_vf());
     ret = RK_MPI_VENC_CreateChn(1, &ea);
     if (ret != RK_SUCCESS) {
         (void)RK_MPI_VI_DisableChn(0, 1);
@@ -1058,6 +1115,416 @@ int hal_preview_acquire(uint8_t **data, int *len, int wait_ms) {
     return 0;
 }
 
+int hal_live_running(void) {
+    return s_live_up ? 1 : 0;
+}
+
+int hal_live_start(int w, int h, int fps) {
+    if (w < 160) {
+        w = 160;
+    }
+    if (h < 120) {
+        h = 120;
+    }
+    w &= ~1;
+    h &= ~1;
+    if (fps < 1) {
+        fps = 5;
+    }
+    if (fps > 15) {
+        fps = 15;
+    }
+    if (s_live_up) {
+        return 0;
+    }
+    pthread_mutex_lock(&s_mpi_mu);
+    rkmpi_dev_ensure();
+    if (!s_sys_up) {
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Live bypass: SYS non partito");
+        return -1;
+    }
+    int started_3a = 0;
+    if (!s_3a_up) {
+        core_video_isp_live_pre();
+        s_3a_up = 1;
+        started_3a = 1;
+    }
+    VI_CHN_ATTR_S va;
+    memset(&va, 0, sizeof(va));
+    va.stIspOpt.u32BufCount = 1;
+    va.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
+    va.stIspOpt.enCaptureType = VI_V4L2_CAPTURE_TYPE_VIDEO_CAPTURE_MPLANE;
+    va.stIspOpt.bNoUseLibV4L2 = RK_TRUE;
+    strncpy(va.stIspOpt.aEntityName, "rkisp_bypasspath", sizeof(va.stIspOpt.aEntityName) - 1);
+    va.stIspOpt.stMaxSize.u32Width = (RK_U32)w;
+    va.stIspOpt.stMaxSize.u32Height = (RK_U32)h;
+    va.stSize.u32Width = (RK_U32)w;
+    va.stSize.u32Height = (RK_U32)h;
+    va.stFrameRate.s32SrcFrameRate = fps;
+    va.stFrameRate.s32DstFrameRate = fps;
+    va.enPixelFormat = RK_FMT_YUV420SP;
+    va.enCompressMode = COMPRESS_MODE_NONE;
+    va.u32Depth = 0;
+    int ret = RK_MPI_VI_SetChnAttr(0, 2, &va);
+    if (ret != RK_SUCCESS) {
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Live bypass SetChnAttr ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    ret = RK_MPI_VI_EnableChn(0, 2);
+    if (ret != RK_SUCCESS) {
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Live bypass EnableChn ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    core_video_reapply_flip();
+    VENC_CHN_ATTR_S ea;
+    memset(&ea, 0, sizeof(ea));
+    ea.stRcAttr.enRcMode = VENC_RC_MODE_MJPEGCBR;
+    ea.stRcAttr.stMjpegCbr.u32BitRate = 800;
+    ea.stRcAttr.stMjpegCbr.u32SrcFrameRateNum = (RK_U32)fps;
+    ea.stRcAttr.stMjpegCbr.u32SrcFrameRateDen = 1;
+    ea.stRcAttr.stMjpegCbr.fr32DstFrameRateNum = (RK_U32)fps;
+    ea.stRcAttr.stMjpegCbr.fr32DstFrameRateDen = 1;
+    ea.stVencAttr.enType = RK_VIDEO_ID_MJPEG;
+    ea.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
+    ea.stVencAttr.u32PicWidth = (RK_U32)w;
+    ea.stVencAttr.u32PicHeight = (RK_U32)h;
+    ea.stVencAttr.u32VirWidth = (RK_U32)w;
+    ea.stVencAttr.u32VirHeight = (RK_U32)h;
+    ea.stVencAttr.u32StreamBufCnt = 2;
+    ea.stVencAttr.u32BufSize = (RK_U32)w * (RK_U32)h;
+    ea.stVencAttr.enMirror = MIRROR_NONE;
+    ret = RK_MPI_VENC_CreateChn(3, &ea);
+    if (ret != RK_SUCCESS) {
+        (void)RK_MPI_VI_DisableChn(0, 2);
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Live bypass VENC ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    VENC_RECV_PIC_PARAM_S rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.s32RecvPicNum = -1;
+    ret = RK_MPI_VENC_StartRecvFrame(3, &rp);
+    if (ret != RK_SUCCESS) {
+        (void)RK_MPI_VENC_DestroyChn(3);
+        (void)RK_MPI_VI_DisableChn(0, 2);
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Live bypass StartRecv ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    MPP_CHN_S src, dst;
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    src.enModId = RK_ID_VI;
+    src.s32ChnId = 2;
+    dst.enModId = RK_ID_VENC;
+    dst.s32ChnId = 3;
+    ret = RK_MPI_SYS_Bind(&src, &dst);
+    if (ret != RK_SUCCESS) {
+        (void)RK_MPI_VENC_StopRecvFrame(3);
+        (void)RK_MPI_VENC_DestroyChn(3);
+        (void)RK_MPI_VI_DisableChn(0, 2);
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Live bypass Bind ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    s_live_up = 1;
+    pthread_mutex_unlock(&s_mpi_mu);
+    if (started_3a) {
+        core_video_isp_live_after_vi();
+    }
+    (void)core_isp_cal_apply_active();
+    ESP_LOGI("hal_cap", "Live MJPEG bypasspath %dx%d@%d", w, h, fps);
+    return 0;
+}
+
+int hal_live_acquire(uint8_t **data, int *len, int wait_ms) {
+    if (data) {
+        *data = nullptr;
+    }
+    if (len) {
+        *len = 0;
+    }
+    if (!s_live_up || !data || !len) {
+        return -1;
+    }
+    if (wait_ms < 0) {
+        wait_ms = 0;
+    }
+    VENC_STREAM_S st;
+    VENC_PACK_S pack;
+    memset(&st, 0, sizeof(st));
+    memset(&pack, 0, sizeof(pack));
+    st.pstPack = &pack;
+    st.u32PackCount = 1;
+    int ret = RK_MPI_VENC_GetStream(3, &st, wait_ms > 0 ? wait_ms : 20);
+    if (ret != RK_SUCCESS || !st.pstPack || st.pstPack->u32Len == 0) {
+        if (ret == RK_SUCCESS) {
+            (void)RK_MPI_VENC_ReleaseStream(3, &st);
+        }
+        return -1;
+    }
+    int n = (int)st.pstPack->u32Len;
+    void *p = RK_MPI_MB_Handle2VirAddr(st.pstPack->pMbBlk);
+    uint8_t *copy = (uint8_t *)malloc((size_t)n);
+    if (!copy || !p) {
+        free(copy);
+        (void)RK_MPI_VENC_ReleaseStream(3, &st);
+        return -1;
+    }
+    memcpy(copy, p, (size_t)n);
+    (void)RK_MPI_VENC_ReleaseStream(3, &st);
+    *data = copy;
+    *len = n;
+    return 0;
+}
+
+void hal_live_stop(void) {
+    if (!s_live_up) {
+        return;
+    }
+    pthread_mutex_lock(&s_mpi_mu);
+    MPP_CHN_S src, dst;
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    src.enModId = RK_ID_VI;
+    src.s32ChnId = 2;
+    dst.enModId = RK_ID_VENC;
+    dst.s32ChnId = 3;
+    (void)RK_MPI_SYS_UnBind(&src, &dst);
+    (void)RK_MPI_VENC_StopRecvFrame(3);
+    (void)RK_MPI_VENC_DestroyChn(3);
+    (void)RK_MPI_VI_DisableChn(0, 2);
+    s_live_up = 0;
+    int main_up = s_cap.mpi;
+    if (s_main_left_up && !s_prev_up && !s_sub_up) {
+        (void)RK_MPI_VI_DisableChn(0, 0);
+        s_main_left_up = 0;
+    }
+    if (!main_up && !s_prev_up && !s_sub_up && s_sys_up) {
+        (void)RK_MPI_VI_DisableDev(0);
+        (void)RK_MPI_SYS_Exit();
+        s_sys_up = 0;
+    }
+    pthread_mutex_unlock(&s_mpi_mu);
+    if (!main_up && !s_prev_up && !s_sub_up) {
+        core_video_isp_stop_3a();
+        s_3a_up = 0;
+        core_video_deinit();
+    }
+    ESP_LOGI("hal_cap", "Live bypass fermato");
+}
+
+int hal_sub_running(void) {
+    return s_sub_up ? 1 : 0;
+}
+
+int hal_sub_start(int w, int h, int fps, uint32_t bitrate) {
+    if (w < 160) {
+        w = 160;
+    }
+    if (h < 120) {
+        h = 120;
+    }
+    w &= ~1;
+    h &= ~1;
+    if (fps < 1) {
+        fps = 15;
+    }
+    if (fps > 30) {
+        fps = 30;
+    }
+    if (s_prev_up) {
+        ESP_LOGW("hal_cap", "Canale 2: selfpath occupato dall'anteprima");
+        return -1;
+    }
+    if (s_sub_up && s_sub_w == w && s_sub_h == h && s_sub_fps == fps) {
+        return 0;
+    }
+    if (s_sub_up) {
+        hal_sub_stop();
+    }
+    pthread_mutex_lock(&s_mpi_mu);
+    rkmpi_dev_ensure();
+    if (!s_sys_up) {
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Canale 2: SYS non partito");
+        return -1;
+    }
+    VI_CHN_ATTR_S va;
+    memset(&va, 0, sizeof(va));
+    const int above = rkmpi_above_1080p(w, h);
+    const int main_big = s_cap.mpi && rkmpi_above_1080p((int)s_cap.w, (int)s_cap.h);
+    va.stIspOpt.u32BufCount = (above || main_big) ? 1 : 2;
+    va.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
+    va.stIspOpt.enCaptureType = VI_V4L2_CAPTURE_TYPE_VIDEO_CAPTURE_MPLANE;
+    va.stIspOpt.bNoUseLibV4L2 = RK_TRUE;
+    strncpy(va.stIspOpt.aEntityName, "rkisp_selfpath", sizeof(va.stIspOpt.aEntityName) - 1);
+    va.stIspOpt.stMaxSize.u32Width = (RK_U32)w;
+    va.stIspOpt.stMaxSize.u32Height = (RK_U32)h;
+    va.stSize.u32Width = (RK_U32)w;
+    va.stSize.u32Height = (RK_U32)h;
+    va.stFrameRate.s32SrcFrameRate = fps;
+    va.stFrameRate.s32DstFrameRate = fps;
+    va.enPixelFormat = RK_FMT_YUV420SP;
+    va.enCompressMode = COMPRESS_MODE_NONE;
+    va.u32Depth = 0;
+    int ret = RK_MPI_VI_SetChnAttr(0, 1, &va);
+    if (ret != RK_SUCCESS) {
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Canale 2 VI SetChnAttr ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    ret = RK_MPI_VI_EnableChn(0, 1);
+    if (ret != RK_SUCCESS) {
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Canale 2 VI EnableChn ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    VENC_CHN_ATTR_S ea;
+    memset(&ea, 0, sizeof(ea));
+    RK_U32 kbps = bitrate / 1000U;
+    if (kbps < 200U) {
+        kbps = 200U;
+    }
+    ea.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
+    ea.stRcAttr.stH264Cbr.u32BitRate = kbps;
+    ea.stRcAttr.stH264Cbr.u32Gop = (RK_U32)fps;
+    ea.stRcAttr.stH264Cbr.u32SrcFrameRateNum = (RK_U32)fps;
+    ea.stRcAttr.stH264Cbr.u32SrcFrameRateDen = 1;
+    ea.stRcAttr.stH264Cbr.fr32DstFrameRateNum = (RK_U32)fps;
+    ea.stRcAttr.stH264Cbr.fr32DstFrameRateDen = 1;
+    ea.stVencAttr.enType = RK_VIDEO_ID_AVC;
+    ea.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
+    ea.stVencAttr.u32PicWidth = (RK_U32)w;
+    ea.stVencAttr.u32PicHeight = (RK_U32)h;
+    ea.stVencAttr.u32VirWidth = (RK_U32)w;
+    ea.stVencAttr.u32VirHeight = (RK_U32)h;
+    ea.stVencAttr.u32StreamBufCnt = 2;
+    ea.stVencAttr.u32BufSize = (RK_U32)w * (RK_U32)h;
+    if (ea.stVencAttr.u32BufSize > (2560U * 1024U)) {
+        ea.stVencAttr.u32BufSize = 2560U * 1024U;
+    }
+    ea.stVencAttr.enMirror = MIRROR_NONE;
+    ret = RK_MPI_VENC_CreateChn(2, &ea);
+    if (ret == RK_SUCCESS) {
+        rkmpi_h264_limit_qp(2, above);
+    }
+    if (ret != RK_SUCCESS) {
+        (void)RK_MPI_VI_DisableChn(0, 1);
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Canale 2 VENC CreateChn ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    VENC_RECV_PIC_PARAM_S rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.s32RecvPicNum = -1;
+    ret = RK_MPI_VENC_StartRecvFrame(2, &rp);
+    if (ret != RK_SUCCESS) {
+        (void)RK_MPI_VENC_DestroyChn(2);
+        (void)RK_MPI_VI_DisableChn(0, 1);
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Canale 2 StartRecv ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    MPP_CHN_S src, dst;
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    src.enModId = RK_ID_VI;
+    src.s32ChnId = 1;
+    dst.enModId = RK_ID_VENC;
+    dst.s32ChnId = 2;
+    ret = RK_MPI_SYS_Bind(&src, &dst);
+    if (ret != RK_SUCCESS) {
+        (void)RK_MPI_VENC_StopRecvFrame(2);
+        (void)RK_MPI_VENC_DestroyChn(2);
+        (void)RK_MPI_VI_DisableChn(0, 1);
+        pthread_mutex_unlock(&s_mpi_mu);
+        ESP_LOGE("hal_cap", "Canale 2 Bind ret=0x%x", (unsigned)ret);
+        return -1;
+    }
+    s_sub_w = w;
+    s_sub_h = h;
+    s_sub_fps = fps;
+    s_sub_up = 1;
+    pthread_mutex_unlock(&s_mpi_mu);
+    ESP_LOGI("hal_cap", "Canale 2 H.264 selfpath %dx%d@%d %u kbps", w, h, fps, (unsigned)kbps);
+    return 0;
+}
+
+int hal_sub_acquire(uint8_t **data, int *len, int wait_ms) {
+    if (data) {
+        *data = nullptr;
+    }
+    if (len) {
+        *len = 0;
+    }
+    if (!s_sub_up || !data || !len) {
+        return -1;
+    }
+    if (wait_ms < 0) {
+        wait_ms = 0;
+    }
+    VENC_STREAM_S st;
+    VENC_PACK_S pack;
+    memset(&st, 0, sizeof(st));
+    memset(&pack, 0, sizeof(pack));
+    st.pstPack = &pack;
+    st.u32PackCount = 1;
+    int ret = RK_MPI_VENC_GetStream(2, &st, wait_ms > 0 ? wait_ms : 20);
+    if (ret != RK_SUCCESS || !st.pstPack || st.pstPack->u32Len == 0) {
+        if (ret == RK_SUCCESS) {
+            (void)RK_MPI_VENC_ReleaseStream(2, &st);
+        }
+        return -1;
+    }
+    int n = (int)st.pstPack->u32Len;
+    void *p = RK_MPI_MB_Handle2VirAddr(st.pstPack->pMbBlk);
+    uint8_t *copy = (uint8_t *)malloc((size_t)n);
+    if (!copy || !p) {
+        free(copy);
+        (void)RK_MPI_VENC_ReleaseStream(2, &st);
+        return -1;
+    }
+    memcpy(copy, p, (size_t)n);
+    (void)RK_MPI_VENC_ReleaseStream(2, &st);
+    *data = copy;
+    *len = n;
+    return 0;
+}
+
+void hal_sub_stop(void) {
+    if (!s_sub_up) {
+        return;
+    }
+    pthread_mutex_lock(&s_mpi_mu);
+    MPP_CHN_S src, dst;
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    src.enModId = RK_ID_VI;
+    src.s32ChnId = 1;
+    dst.enModId = RK_ID_VENC;
+    dst.s32ChnId = 2;
+    (void)RK_MPI_SYS_UnBind(&src, &dst);
+    (void)RK_MPI_VENC_StopRecvFrame(2);
+    (void)RK_MPI_VENC_DestroyChn(2);
+    (void)RK_MPI_VI_DisableChn(0, 1);
+    s_sub_up = 0;
+    s_sub_w = 0;
+    s_sub_h = 0;
+    s_sub_fps = 0;
+    int main_up = s_cap.mpi;
+    if (!main_up && !s_prev_up && !s_live_up && s_sys_up) {
+        (void)RK_MPI_VI_DisableDev(0);
+        (void)RK_MPI_SYS_Exit();
+        s_sys_up = 0;
+    }
+    pthread_mutex_unlock(&s_mpi_mu);
+    ESP_LOGI("hal_cap", "Canale 2 fermato");
+}
+
 static void hal_preview_stop_impl(int force) {
     if (!s_prev_up && !s_sys_up) {
         return;
@@ -1083,19 +1550,21 @@ static void hal_preview_stop_impl(int force) {
         (void)RK_MPI_VI_DisableChn(0, 1);
         s_prev_up = 0;
         s_prev_luma_only = 0;
+        s_prev_hf = -1;
+        s_prev_vf = -1;
     }
-    if (s_main_left_up) {
+    if (s_main_left_up && !s_sub_up && !s_live_up) {
         (void)RK_MPI_VI_DisableChn(0, 0);
         s_main_left_up = 0;
     }
     int main_up = s_cap.mpi;
-    if (!main_up && s_sys_up) {
+    if (!main_up && !s_sub_up && !s_live_up && s_sys_up) {
         (void)RK_MPI_VI_DisableDev(0);
         (void)RK_MPI_SYS_Exit();
         s_sys_up = 0;
     }
     pthread_mutex_unlock(&s_mpi_mu);
-    if (!main_up) {
+    if (!main_up && !s_sub_up && !s_live_up) {
         core_video_isp_stop_3a();
         s_3a_up = 0;
         core_video_deinit();
@@ -1406,6 +1875,7 @@ int hal_preview_running(void) { return 0; }
 int hal_main_running(void) { return 0; }
 void hal_mark_3a_down(void) {}
 void hal_capture_request_idr(void) {}
+int hal_preview_flip_matches(void) { return 0; }
 int hal_preview_start(int, int, int, int) { return -1; }
 void hal_preview_reapply_flip(void) {}
 void hal_vi_apply_flip(int) {}
@@ -1433,6 +1903,30 @@ int hal_preview_acquire(uint8_t **data, int *len, int) {
     }
     return -1;
 }
+int hal_sub_start(int, int, int, uint32_t) { return -1; }
+int hal_sub_acquire(uint8_t **data, int *len, int) {
+    if (data) {
+        *data = nullptr;
+    }
+    if (len) {
+        *len = 0;
+    }
+    return -1;
+}
+void hal_sub_stop(void) {}
+int hal_sub_running(void) { return 0; }
+int hal_live_start(int, int, int) { return -1; }
+int hal_live_acquire(uint8_t **data, int *len, int) {
+    if (data) {
+        *data = nullptr;
+    }
+    if (len) {
+        *len = 0;
+    }
+    return -1;
+}
+void hal_live_stop(void) {}
+int hal_live_running(void) { return 0; }
 void hal_preview_stop(void) {}
 void hal_preview_stop_force(void) {}
 #endif

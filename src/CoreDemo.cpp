@@ -260,9 +260,12 @@ static void demo_motion_task(void *arg) {
     core_settings_t settings = *(const core_settings_t *)arg;
     free(arg);
 
-    uint16_t pw = 640;
-    uint16_t ph = 360;
-    core_live_preview_size(settings.video_width, settings.video_height, &pw, &ph);
+    uint16_t pw = settings.ch2_width ? settings.ch2_width : 1280;
+    uint16_t ph = settings.ch2_height ? settings.ch2_height : 720;
+    if (pw == 0 || ph == 0 || (uint32_t)pw * (uint32_t)ph > 1920u * 1080u) {
+        pw = 1280;
+        ph = 720;
+    }
 
     if (hal_preview_start((int)pw, (int)ph, CORE_DEMO_PREVIEW_FPS, 2) != 0) {
         ESP_LOGE(TAG, "Preview demo non avviata");
@@ -311,6 +314,17 @@ static void demo_motion_task(void *arg) {
                 ESP_LOGI(TAG, "DEMO: luma ferma, camera libera per RTSP");
             }
             vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        if (core_live_is_running() && !hal_live_running()) {
+            if (luma_up) {
+                free(prev);
+                prev = nullptr;
+                prev_w = prev_h = prev_stride = 0;
+                luma_up = false;
+                ESP_LOGI(TAG, "DEMO: luma in pausa, il live usa il selfpath");
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
         if (!luma_up) {

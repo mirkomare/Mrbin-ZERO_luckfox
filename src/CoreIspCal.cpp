@@ -237,7 +237,7 @@ static bool core_isp_cproc_set(int bright, int contrast, int sat, int hue) {
     if (fd < 0) {
         static int fails = 0;
         if ((fails++ % 20) == 0) {
-            ESP_LOGW(TAG, "ACP SC3336: socket 3A non raggiungibile");
+            ESP_LOGW(TAG, "ACP %s: socket 3A non raggiungibile", core_video_sensor_name());
         }
         return false;
     }
@@ -280,7 +280,7 @@ static bool core_isp_cproc_set(int bright, int contrast, int sat, int hue) {
             memcpy(&result, reply + 10, 4);
             ok = (result == 0);
             if (!ok) {
-                ESP_LOGW(TAG, "ACP SC3336 rifiutato (%d)", (int)result);
+                ESP_LOGW(TAG, "ACP %s rifiutato (%d)", core_video_sensor_name(), (int)result);
             }
         }
     }
@@ -292,7 +292,7 @@ static bool core_isp_cproc_set(int bright, int contrast, int sat, int hue) {
             last_c = c;
             last_s = s;
             last_h = h;
-            ESP_LOGI(TAG, "ACP SC3336 %d/%d/%d/%d", b, c, s, h);
+            ESP_LOGI(TAG, "ACP %s %d/%d/%d/%d", core_video_sensor_name(), b, c, s, h);
         }
     }
     return ok;
@@ -446,8 +446,26 @@ static void core_isp_cal_migrate_v2(const core_isp_cal_v2_t *v2, core_isp_cal_t 
     }
 }
 
-bool core_isp_cal_load(core_isp_cal_t *out) {
-    if (!out) {
+static const char *core_isp_cal_sensor_key(void) {
+    switch (core_video_sensor_kind()) {
+    case CORE_VIDEO_SENSOR_IMX415:
+        return "cal_imx415";
+    case CORE_VIDEO_SENSOR_IMX708:
+        return "cal_imx708";
+    case CORE_VIDEO_SENSOR_SC3336:
+        return "cal_sc3336";
+    case CORE_VIDEO_SENSOR_OV5647:
+        return "cal_ov5647";
+    default:
+        return nullptr;
+    }
+}
+
+static bool core_isp_cal_read_key(const char *key, core_isp_cal_t *out, bool *found) {
+    if (found) {
+        *found = false;
+    }
+    if (!out || !key) {
         return false;
     }
     core_isp_cal_set_defaults(out);
@@ -464,11 +482,14 @@ bool core_isp_cal_load(core_isp_cal_t *out) {
     } blob = {};
 
     size_t len = sizeof(blob);
-    esp_err_t err = nvs_get_blob(nvs, "isp_cal", &blob, &len);
+    esp_err_t err = nvs_get_blob(nvs, key, &blob, &len);
     nvs_close(nvs);
 
     if (err != ESP_OK) {
         return true;
+    }
+    if (found) {
+        *found = true;
     }
 
     if (len < 5 || blob.magic != CORE_ISP_CAL_MAGIC) {
@@ -492,7 +513,7 @@ bool core_isp_cal_load(core_isp_cal_t *out) {
         if (len == sizeof(old)) {
             if (nvs_open(CORE_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
                 len = sizeof(old);
-                if (nvs_get_blob(nvs, "isp_cal", &old, &len) == ESP_OK) {
+                if (nvs_get_blob(nvs, key, &old, &len) == ESP_OK) {
                     core_isp_cal_set_defaults(out);
                     out->manual_isp_enabled = old.cal.manual_isp_enabled;
                     out->schedule_enabled = old.cal.schedule_enabled;
@@ -517,7 +538,7 @@ bool core_isp_cal_load(core_isp_cal_t *out) {
         if (len == sizeof(old)) {
             if (nvs_open(CORE_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
                 len = sizeof(old);
-                if (nvs_get_blob(nvs, "isp_cal", &old, &len) == ESP_OK) {
+                if (nvs_get_blob(nvs, key, &old, &len) == ESP_OK) {
                     core_isp_cal_migrate_v2(&old.cal, out);
                 }
                 nvs_close(nvs);
@@ -532,7 +553,7 @@ bool core_isp_cal_load(core_isp_cal_t *out) {
         if (len == sizeof(old)) {
             if (nvs_open(CORE_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
                 len = sizeof(old);
-                if (nvs_get_blob(nvs, "isp_cal", &old, &len) == ESP_OK) {
+                if (nvs_get_blob(nvs, key, &old, &len) == ESP_OK) {
                     core_isp_cal_migrate_v1(&old.cal, out);
                 }
                 nvs_close(nvs);
@@ -542,8 +563,42 @@ bool core_isp_cal_load(core_isp_cal_t *out) {
     return true;
 }
 
+bool core_isp_cal_load(core_isp_cal_t *out) {
+    if (!out) {
+        return false;
+    }
+    core_isp_cal_set_defaults(out);
+    const char *key = core_isp_cal_sensor_key();
+    bool found = false;
+    if (key) {
+        core_isp_cal_read_key(key, out, &found);
+        if (found) {
+            ESP_LOGI(TAG, "Calibrazione caricata da %s (%s)", key, core_video_sensor_name());
+            return true;
+        }
+        core_isp_cal_set_defaults(out);
+    }
+    /* IMX415 non eredita isp_cal: quel blob può appartenere a un'altra camera. */
+    if (core_video_sensor_kind() == CORE_VIDEO_SENSOR_IMX415) {
+        ESP_LOGI(TAG, "IMX415 senza cal_imx415: valori di default");
+        return true;
+    }
+    found = false;
+    core_isp_cal_read_key("isp_cal", out, &found);
+    if (found) {
+        ESP_LOGI(TAG, "Calibrazione legacy isp_cal per %s (non riscritta)", core_video_sensor_name());
+    }
+    return true;
+}
+
 bool core_isp_cal_save(const core_isp_cal_t *in) {
     if (!in || !core_isp_cal_valid(in)) {
+        return false;
+    }
+
+    const char *key = core_isp_cal_sensor_key();
+    if (!key) {
+        ESP_LOGE(TAG, "Sensore sconosciuto: calibrazione non salvata, isp_cal intatto");
         return false;
     }
 
@@ -562,7 +617,7 @@ bool core_isp_cal_save(const core_isp_cal_t *in) {
         .cal = *in,
     };
 
-    esp_err_t err = nvs_set_blob(nvs, "isp_cal", &blob, sizeof(blob));
+    esp_err_t err = nvs_set_blob(nvs, key, &blob, sizeof(blob));
     if (err == ESP_OK) {
         err = nvs_commit(nvs);
     }
@@ -574,8 +629,8 @@ bool core_isp_cal_save(const core_isp_cal_t *in) {
 
     s_cal_cache = *in;
     s_cal_loaded = true;
-    ESP_LOGI(TAG, "Calibrazione ISP salvata (manual=%d default=%u)",
-             in->manual_isp_enabled ? 1 : 0, (unsigned)in->default_profile);
+    ESP_LOGI(TAG, "Calibrazione ISP salvata in %s (manual=%d default=%u)",
+             key, in->manual_isp_enabled ? 1 : 0, (unsigned)in->default_profile);
     return true;
 }
 
@@ -584,6 +639,12 @@ void core_isp_cal_init(void) {
         core_isp_cal_load(&s_cal_cache);
         s_cal_loaded = true;
     }
+}
+
+void core_isp_cal_bind_sensor(void) {
+    s_cal_loaded = false;
+    s_startup_wb_done = false;
+    core_isp_cal_init();
 }
 
 const core_isp_cal_t *core_isp_cal_get(void) {
@@ -752,6 +813,9 @@ bool core_isp_cal_imx708_tune_ipa(void) {
 }
 
 bool core_isp_cal_startup_wb_check(void) {
+    if (core_rec_fast_requested()) {
+        return true;
+    }
     if (s_startup_wb_done) {
         return true;
     }
@@ -891,6 +955,9 @@ bool core_isp_cal_apply_profile(const core_isp_profile_t *profile) {
 }
 
 bool core_isp_cal_apply_active(void) {
+    if (core_rec_fast_requested()) {
+        return true;
+    }
     const core_isp_cal_t *cal = core_isp_cal_get();
     if (core_isp_is_sc3336()) {
         if (!cal->manual_isp_enabled) {

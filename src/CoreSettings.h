@@ -32,7 +32,10 @@ typedef struct {
     uint8_t  osd_font;          // px: 12/16/20/24/32
     uint8_t  osd_x_pct;         // 0–100: posizione angolo alto-sx (%% larghezza frame)
     uint8_t  osd_y_pct;         // 0–100: posizione angolo alto-sx (%% altezza frame)
-    bool     rtsp_always;       // true: encoder H.264 sempre su per rtsp://:554/live
+    bool     rtsp_always;       // true: entrambi i canali RTSP accesi (pulsante)
+    uint16_t ch2_width;         // canale 2: solo movimento e RTSP
+    uint16_t ch2_height;
+    uint8_t  ch2_fps;
 } core_settings_t;
 
 void core_settings_video_set_defaults(core_settings_t *s);
@@ -41,6 +44,7 @@ bool core_settings_bayer_mode_valid(uint8_t mode);
 void core_settings_video_normalize(core_settings_t *s);
 uint32_t core_settings_video_frame_ms(const core_settings_t *s);
 uint32_t core_settings_video_bitrate(const core_settings_t *s);
+uint32_t core_settings_bitrate_for(uint16_t width, uint16_t height, uint8_t fps);
 uint32_t core_settings_video_gop(const core_settings_t *s);
 
 bool core_settings_rec_pins_valid(uint8_t start_gpio, uint8_t stop_gpio);

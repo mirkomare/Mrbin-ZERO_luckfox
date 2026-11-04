@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-/* Listener on :554 (or :8554). The encoder runs when a client is playing,
- * or all the time when rtsp_always is set. */
+/* Listener on :554 (or :8554). Both encoders run only when rtsp_always is set.
+ * A client does not start them. /live is channel 1. */
 void core_rtsp_start(const core_settings_t *settings);
 void core_rtsp_apply(const core_settings_t *settings);
 
@@ -26,8 +26,10 @@ int core_rtsp_rec_attach(const core_settings_t *settings);
 void core_rtsp_rec_detach(void);
 int core_rtsp_rec_take(uint8_t **data, int *len, uint32_t *pts, int timeout_ms);
 
-/* rtsp://<ip>:<port>/live */
+/* rtsp://<ip>:<port>/live  (alias del canale 1) */
 void core_rtsp_url(char *out, size_t out_len);
+/* ch 2 → /ch2, altrimenti /ch1 */
+void core_rtsp_url_ch(int ch, char *out, size_t out_len);
 
 #ifdef __cplusplus
 }

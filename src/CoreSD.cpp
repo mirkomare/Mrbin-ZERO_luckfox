@@ -384,7 +384,7 @@ bool core_sd_format(void) {
     s_card = nullptr;
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    ESP_LOGW(TAG, "Formattazione FAT32 su /dev/mmcblk1p1 (mkfs.vfat)…");
+    ESP_LOGW(TAG, "Formattazione FAT32 della SD (mkfs.vfat)…");
     esp_err_t err = esp_vfs_fat_sdcard_format(CORE_SD_MOUNT_POINT, nullptr);
     bool ok = (err == ESP_OK);
     if (ok) {

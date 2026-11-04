@@ -111,11 +111,24 @@ int esp_capture_retarget_h264(int w, int h, int keep_fps, uint32_t bitrate, uint
 /* MJPEG on rkisp_selfpath (VI/VENC channel 1). Independent of the H.264 main pipe.
  * vi_user_depth: 0 = MJPEG only (Live). >0 = VI depth for GetChnFrame luma (DEMO motion, no VENC). */
 int hal_preview_start(int w, int h, int fps, int vi_user_depth);
+/* 1 when the open preview VENC already matches the saved hflip/vflip. */
+int hal_preview_flip_matches(void);
 /* Dopo EnableChn / pir-lock: i flag GUI vanno sul canale VI, non solo sul subdev. */
 void hal_preview_reapply_flip(void);
 void hal_vi_apply_flip(int chn);
 int hal_preview_acquire(uint8_t **data, int *len, int wait_ms);
 int hal_preview_acquire_luma(uint8_t **y, int *w, int *h, int *stride, int wait_ms);
+/* Second H.264 on rkisp_selfpath (VI ch1, VENC ch2). Not the live MJPEG. */
+int hal_sub_start(int w, int h, int fps, uint32_t bitrate);
+int hal_sub_acquire(uint8_t **data, int *len, int wait_ms);
+void hal_sub_stop(void);
+int hal_sub_running(void);
+/* Local MJPEG on rkisp_bypasspath (VI ch 2, VENC ch 3).
+ * Selfpath stays free for DEMO luma or RTSP channel 2. */
+int hal_live_start(int w, int h, int fps);
+int hal_live_acquire(uint8_t **data, int *len, int wait_ms);
+void hal_live_stop(void);
+int hal_live_running(void);
 void hal_preview_stop(void);
 void hal_preview_stop_force(void);
 int hal_preview_running(void);

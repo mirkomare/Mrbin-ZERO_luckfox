@@ -88,6 +88,9 @@ void core_settings_video_set_defaults(core_settings_t *s) {
     s->video_vflip = false;
     s->video_hflip = false;
     s->video_bayer_mode = CORE_VIDEO_BAYER_AUTO;
+    s->ch2_width = 1280;
+    s->ch2_height = 720;
+    s->ch2_fps = 15;
     s->rec_encrypt = false;
     s->rec_media_mode = CORE_REC_MEDIA_VIDEO;
     s->rec_stop_mode = CORE_REC_STOP_MODE_GPIO;
@@ -250,19 +253,23 @@ uint32_t core_settings_video_frame_ms(const core_settings_t *s) {
     return 1000U / (uint32_t)fps;
 }
 
-uint32_t core_settings_video_bitrate(const core_settings_t *s) {
-    if (!s) {
+uint32_t core_settings_bitrate_for(uint16_t width, uint16_t height, uint8_t fps) {
+    if (width == 0 || height == 0 || fps == 0) {
         return CORE_VIDEO_BITRATE_DEFAULT;
     }
-    uint64_t px = (uint64_t)s->video_width * (uint64_t)s->video_height * (uint64_t)s->video_fps;
+    uint64_t px = (uint64_t)width * (uint64_t)height * (uint64_t)fps;
     uint64_t base_px = (uint64_t)CORE_VIDEO_WIDTH_DEFAULT * (uint64_t)CORE_VIDEO_HEIGHT_DEFAULT
                        * (uint64_t)CORE_VIDEO_FPS_DEFAULT;
     if (base_px == 0) {
         return CORE_VIDEO_BITRATE_DEFAULT;
     }
     uint64_t bps = ((uint64_t)CORE_VIDEO_BITRATE_DEFAULT * px) / base_px;
-    if (CORE_VIDEO_IS_FULLHD(s->video_width, s->video_height) &&
-        bps < CORE_VIDEO_BITRATE_1080_MIN) {
+    /* 0.28 bit per pixel: 8 MP at 15 fps sits on the 28 Mbps cap. */
+    uint64_t motion = (px * 28ULL) / 100ULL;
+    if (bps < motion) {
+        bps = motion;
+    }
+    if (CORE_VIDEO_IS_FULLHD(width, height) && bps < CORE_VIDEO_BITRATE_1080_MIN) {
         bps = CORE_VIDEO_BITRATE_1080_MIN;
     }
     if (bps < CORE_VIDEO_BITRATE_MIN) {
@@ -274,10 +281,24 @@ uint32_t core_settings_video_bitrate(const core_settings_t *s) {
     return (uint32_t)bps;
 }
 
+uint32_t core_settings_video_bitrate(const core_settings_t *s) {
+    if (!s) {
+        return CORE_VIDEO_BITRATE_DEFAULT;
+    }
+    return core_settings_bitrate_for(s->video_width, s->video_height, s->video_fps);
+}
+
 uint32_t core_settings_video_gop(const core_settings_t *s) {
     uint8_t fps = s ? s->video_fps : (uint8_t)CORE_VIDEO_FPS_DEFAULT;
     if (fps == 0) {
         fps = (uint8_t)CORE_VIDEO_FPS_DEFAULT;
+    }
+    if (s && (uint32_t)s->video_width * (uint32_t)s->video_height > (1920u * 1080u)) {
+        uint32_t gop = (uint32_t)fps / 2U;
+        if (gop < 4U) {
+            gop = 4U;
+        }
+        return gop;
     }
     if (fps <= CORE_VIDEO_FPS_LOW_MAX) {
         uint32_t gop = (uint32_t)fps * 2U;
@@ -377,6 +398,17 @@ bool core_settings_load(core_settings_t *out) {
         out->video_height = vh;
         out->video_fps = vf;
     }
+    uint16_t c2w = 0;
+    uint16_t c2h = 0;
+    uint8_t c2f = 0;
+    if (nvs_get_u16(s_nvs, "ch2_w", &c2w) == ESP_OK &&
+        nvs_get_u16(s_nvs, "ch2_h", &c2h) == ESP_OK &&
+        nvs_get_u8(s_nvs, "ch2_fps", &c2f) == ESP_OK &&
+        core_settings_video_valid(c2w, c2h, c2f)) {
+        out->ch2_width = c2w;
+        out->ch2_height = c2h;
+        out->ch2_fps = c2f;
+    }
     uint8_t flip = 0;
     if (nvs_get_u8(s_nvs, "video_vflip", &flip) == ESP_OK) {
         out->video_vflip = (flip != 0);
@@ -473,6 +505,17 @@ bool core_settings_save(const core_settings_t *in) {
     err = nvs_set_u16(s_nvs, "video_h", video.video_height);
     if (err != ESP_OK) return false;
     err = nvs_set_u8(s_nvs, "video_fps", video.video_fps);
+    if (err != ESP_OK) return false;
+    if (!core_settings_video_valid(video.ch2_width, video.ch2_height, video.ch2_fps)) {
+        video.ch2_width = 1280;
+        video.ch2_height = 720;
+        video.ch2_fps = 15;
+    }
+    err = nvs_set_u16(s_nvs, "ch2_w", video.ch2_width);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u16(s_nvs, "ch2_h", video.ch2_height);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u8(s_nvs, "ch2_fps", video.ch2_fps);
     if (err != ESP_OK) return false;
     err = nvs_set_u8(s_nvs, "video_vflip", in->video_vflip ? 1 : 0);
     if (err != ESP_OK) return false;

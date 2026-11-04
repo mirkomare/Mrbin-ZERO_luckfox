@@ -156,7 +156,8 @@ static const char *web_nav(void) {
                  "<a href=\"/calibrate\">Calibrazione</a><a href=\"/schedule\">RTC</a>"
                  "%s"
                  "<a href=\"/mrbin\">MrBin</a>"
-                 "<a href=\"/rec_video\">Reg. video</a><a href=\"/videos\">Video</a>"
+                 "<a href=\"/rec_video\">Reg. video</a><a href=\"/channels\">Canali Video</a>"
+                 "<a href=\"/videos\">Video</a>"
                  "<a href=\"/photos\">Foto/Timelapse</a><a href=\"/logout\">Logout</a></nav>",
                  demo, hw_link);
     } else {
@@ -165,7 +166,7 @@ static const char *web_nav(void) {
                  "<a href=\"/calibrate\">Calibrazione</a>"
                  "%s"
                  "<a href=\"/mrbin\">MrBin</a>"
-                 "<a href=\"/rec_video\">Reg. video</a><a href=\"/videos\">Video</a>"
+                 "<a href=\"/rec_video\">Reg. video</a><a href=\"/channels\">Canali Video</a><a href=\"/videos\">Video</a>"
                  "<a href=\"/photos\">Foto/Timelapse</a><a href=\"/logout\">Logout</a></nav>",
                  demo, hw_link);
     }
@@ -1112,10 +1113,8 @@ Per la massima definizione usa <strong>3840×2160</strong>. Con cifratura attiva
 </fieldset>
 <fieldset>
 <legend>Streamer RTSP</legend>
-<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="rtsp_always" value="1" style="width:auto;margin:0"%s>Tieni lo streamer sempre acceso</label>
-<p class="hint" style="margin:6px 0 0">Indirizzo: <code>%s</code>. H.264, la stessa risoluzione della registrazione.
-Spento: la camera parte quando ti colleghi e si ferma all'ultimo client.
-Acceso: lo stream resta su anche senza client. La registrazione scrive gli stessi frame. L'anteprima è un secondo canale e non lo spegne.</p>
+<p class="hint" style="margin:6px 0 0">RTSP si accende e si spegne dalla pagina <a href="/channels">Canali Video</a>.
+Canale 1 usa questa risoluzione. Un client collegato non accende lo stream da solo.</p>
 </fieldset>
 <fieldset>
 <legend>Sicurezza registrazione</legend>
@@ -1178,6 +1177,7 @@ function clampFullHdFps(){
 function syncBeforeSave(){
   applyPreset();
   clampFullHdFps();
+  alert('Reg. video è legato al canale 1. I nuovi parametri aggiornano anche il canale 1.');
   return true;
 }
 function onMediaChange(){
@@ -1620,7 +1620,6 @@ async function flipChange(){
   const h=document.getElementById('flipH').checked?1:0;
   const st=document.getElementById('flipStatus');
   const img=document.getElementById('liveImg');
-  applyFlipCss(v,h);
   st.textContent='Applico…';
   try{
     const r=await fetch('/live/flip',{method:'POST',credentials:'same-origin',
@@ -1629,12 +1628,16 @@ async function flipChange(){
     if(r.ok){
       var j={}; try{j=JSON.parse(await r.text());}catch(e){}
       if(j.hw){
+        /* Multipart MJPEG often never fires img.onload, so a CSS scale
+         * left on the element cancels the encoder mirror and the picture
+         * snaps back to the previous orientation. */
+        applyFlipCss(0,0);
         st.textContent='Salvato — anteprima hardware';
-        if(img) img.onload=function(){ applyFlipCss(0,0); img.onload=null; };
+        if(img){ img.onload=null; img.src='/live/stream?ts='+Date.now(); }
       }else{
+        applyFlipCss(v,h);
         st.textContent='Salvato — anteprima CSS';
       }
-      if(img) img.src='/live/stream?ts='+Date.now();
     }else{
       st.textContent='Errore salvataggio';
     }
@@ -1674,7 +1677,6 @@ function focusPost(path,pos){
   };
 })();
 function liveKick(){
-  if(window.__MRBIN_DEMO){ return; }
   var img=document.getElementById('liveImg');
   if(!img) return;
   if(recPhase!=='idle') return;
@@ -1739,13 +1741,6 @@ recPoll();
 
 static esp_err_t handle_live_stream(httpd_req_t *req) {
     if (!is_authed(req)) return send_redirect(req, "/");
-    if (core_demo_is_active() && !core_demo_rtsp_view()) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_send(req,
-                               "Live disabilitata in DEMO. Premi Attiva RTSP per liberare la camera.",
-                               HTTPD_RESP_USE_STRLEN);
-    }
     if (core_recorder_manual_is_active()) {
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "text/plain");
@@ -2014,6 +2009,10 @@ static esp_err_t handle_demo_rtsp(httpd_req_t *req) {
     char on_s[4] = {0};
     form_get_value(buf, "on", on_s, sizeof(on_s));
     const bool on = on_s[0] == '1';
+    s_settings->rtsp_always = on;
+    if (!core_settings_save(s_settings)) {
+        return send_json(req, "{\"ok\":false,\"msg\":\"NVS non salvata\"}");
+    }
     if (!core_demo_set_rtsp_view(on, s_settings)) {
         return send_json(req, "{\"ok\":false,\"msg\":\"RTSP non commutato\"}");
     }
@@ -2076,10 +2075,8 @@ static esp_err_t handle_live_get(httpd_req_t *req) {
     httpd_resp_sendstr_chunk(req, tail);
     if (core_demo_is_active() && !core_demo_rtsp_view()) {
         httpd_resp_sendstr_chunk(req,
-                                 "<p class='live-meta'><strong>DEMO:</strong> il movimento tiene la camera. "
-                                 "Premi <strong>Attiva RTSP</strong> per lo stream e il live. "
-                                 "Spegni RTSP per far tornare il movimento.</p>"
-                                 "<script>window.__MRBIN_DEMO=1;</script>");
+                                 "<p class='live-meta'><strong>DEMO:</strong> il video locale resta acceso "
+                                 "anche con RTSP spento. Il movimento continua finche non premi Attiva RTSP.</p>");
     } else if (core_demo_is_active()) {
         char url[80];
         core_rtsp_url(url, sizeof(url));
@@ -3931,8 +3928,6 @@ static esp_err_t handle_rec_video_get(httpd_req_t *req) {
     uint8_t osd_xp = s_settings ? s_settings->osd_x_pct : (uint8_t)CORE_REC_OSD_X_PCT_DEFAULT;
     uint8_t osd_yp = s_settings ? s_settings->osd_y_pct : (uint8_t)CORE_REC_OSD_Y_PCT_DEFAULT;
     bool osd_en = s_settings ? s_settings->osd_enable : true;
-    char rtsp_url[80];
-    core_rtsp_url(rtsp_url, sizeof(rtsp_url));
     int off = snprintf(html, html_cap, "%s%s<h2>Registrazione video IMX415 (H264 SD)</h2>%s%s%s",
                        REC_VIDEO_HTML_HEAD, web_nav(), flash, stats, last_pipe);
     if (off < 0) {
@@ -3951,8 +3946,6 @@ static esp_err_t handle_rec_video_get(httpd_req_t *req) {
              (unsigned)CORE_VIDEO_FPS_MIN, (unsigned)CORE_VIDEO_FPS_MAX, (unsigned)vf,
              (s_settings && s_settings->video_vflip) ? " checked" : "",
              (s_settings && s_settings->video_hflip) ? " checked" : "",
-             (s_settings && s_settings->rtsp_always) ? " checked" : "",
-             rtsp_url,
              rec_enc ? " checked" : "",
              osd_en ? " checked" : "",
              (osd_font == 12) ? " selected" : "",
@@ -4038,10 +4031,8 @@ static esp_err_t handle_rec_video_post(httpd_req_t *req) {
     char osd_font_s[8] = {0};
     char osd_xp_s[8] = {0};
     char osd_yp_s[8] = {0};
-    char rtsp_s[4] = {0};
     form_get_value(buf, "video_vflip", vflip_s, sizeof(vflip_s));
     form_get_value(buf, "video_hflip", hflip_s, sizeof(hflip_s));
-    form_get_value(buf, "rtsp_always", rtsp_s, sizeof(rtsp_s));
     form_get_value(buf, "rec_encrypt", rec_enc_s, sizeof(rec_enc_s));
     form_get_value(buf, "rec_media", media_s, sizeof(media_s));
     form_get_value(buf, "osd_en", osd_en_s, sizeof(osd_en_s));
@@ -4063,7 +4054,6 @@ static esp_err_t handle_rec_video_post(httpd_req_t *req) {
     s_settings->video_fps = fps;
     s_settings->video_vflip = (vflip_s[0] == '1');
     s_settings->video_hflip = (hflip_s[0] == '1');
-    s_settings->rtsp_always = (rtsp_s[0] == '1');
     s_settings->rec_encrypt = (rec_enc_s[0] == '1');
     s_settings->osd_enable = (osd_en_s[0] == '1');
     s_settings->osd_font = (uint8_t)atoi(osd_font_s);
@@ -6563,6 +6553,9 @@ static esp_err_t handle_calibrate_post(httpd_req_t *req) {
     if (!core_isp_cal_save(&s_isp_cal)) {
         return send_redirect(req, "/calibrate?err=save");
     }
+    if (!core_rec_fast_requested()) {
+        core_video_isp_live_pre();
+    }
     (void)core_isp_cal_apply_active();
     return send_redirect(req, "/calibrate?ok=1");
 }
@@ -7311,13 +7304,262 @@ bool core_web_sta_has_ip(void) {
 static esp_err_t handle_wifi_get(httpd_req_t *req);
 static esp_err_t handle_wifi_post(httpd_req_t *req);
 
+static const char *CHANNELS_HTML = R"HTML(
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Canali Video</title>
+<style>
+body{font-family:sans-serif;max-width:720px;margin:24px auto}
+input,button,select{padding:8px;margin:4px 0;width:100%%;box-sizing:border-box}
+nav a{margin-right:12px}
+fieldset{border:1px solid #ccc;border-radius:8px;padding:12px 16px;margin:16px 0}
+.hint{font-size:14px;color:#555;line-height:1.45}
+.alert{padding:12px;margin:12px 0;border-radius:6px}
+.ok{background:#e8f7ea;border:1px solid #8fd19a}
+.err{background:#fdecea;border:1px solid #f5a8a0}
+.row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+</style></head><body>
+%s
+<h2>Canali Video</h2>
+%s
+<form method="POST" action="/rtsp/switch">
+<input type="hidden" name="on" value="%s">
+<button type="submit">%s</button>
+<p class="hint">Un solo pulsante accende o spegne sempre entrambi i canali. Spento di default: un client collegato non avvia lo stream.</p>
+</form>
+<fieldset>
+<legend>Canale 1 — registrazione e RTSP</legend>
+<p class="hint">È la stessa risoluzione di Reg. video. Se la cambi, Reg. video viene sovrascritta con gli stessi numeri.</p>
+<form method="POST" action="/channels" onsubmit="return ch1Save()">
+<input type="hidden" name="channel" value="1">
+<label>Preset</label>
+<select name="preset" id="p1" onchange="usePreset('p1','w1','h1','f1')">
+<option value="">— personalizzato —</option>
+<option value="3840,2160,15">3840×2160 @ 15 fps</option>
+<option value="3072,1728,15">3072×1728 @ 15 fps</option>
+<option value="2560,1440,30">2560×1440 @ 30 fps</option>
+<option value="2304,1296,30">2304×1296 @ 30 fps</option>
+<option value="1920,1080,30">1920×1080 @ 30 fps</option>
+<option value="1920,1080,15">1920×1080 @ 15 fps</option>
+<option value="1280,720,30">1280×720 @ 30 fps</option>
+<option value="1280,720,15">1280×720 @ 15 fps</option>
+<option value="640,480,15">640×480 @ 15 fps</option>
+</select>
+<div class="row">
+<label>Larghezza<input name="w" id="w1" type="number" min="640" max="3840" step="2" value="%u" required></label>
+<label>Altezza<input name="h" id="h1" type="number" min="480" max="2160" step="2" value="%u" required></label>
+<label>fps<input name="fps" id="f1" type="number" min="1" max="30" value="%u" required></label>
+</div>
+<button type="submit">Salva canale 1</button>
+</form>
+<p class="hint">%s</p>
+</fieldset>
+<fieldset>
+<legend>Canale 2 — movimento e RTSP</legend>
+<p class="hint">Non registra su SD. Serve al rilevamento movimento, se attivo, e allo stream RTSP. Sopra 1920×1080 il movimento usa 1280×720.</p>
+<form method="POST" action="/channels">
+<input type="hidden" name="channel" value="2">
+<label>Preset</label>
+<select name="preset" id="p2" onchange="usePreset('p2','w2','h2','f2')">
+<option value="">— personalizzato —</option>
+<option value="1920,1080,15">1920×1080 @ 15 fps</option>
+<option value="1280,720,15">1280×720 @ 15 fps</option>
+<option value="1280,720,10">1280×720 @ 10 fps</option>
+<option value="640,480,15">640×480 @ 15 fps</option>
+<option value="640,360,10">640×360 @ 10 fps</option>
+</select>
+<div class="row">
+<label>Larghezza<input name="w" id="w2" type="number" min="640" max="3840" step="2" value="%u" required></label>
+<label>Altezza<input name="h" id="h2" type="number" min="360" max="2160" step="2" value="%u" required></label>
+<label>fps<input name="fps" id="f2" type="number" min="1" max="30" value="%u" required></label>
+</div>
+<button type="submit">Salva canale 2</button>
+</form>
+<p class="hint">%s</p>
+</fieldset>
+<script>
+var IW=%u,IH=%u,IF=%u;
+function usePreset(sel,w,h,f){
+  var v=document.getElementById(sel).value;
+  if(!v)return;
+  var p=v.split(',');
+  document.getElementById(w).value=p[0];
+  document.getElementById(h).value=p[1];
+  document.getElementById(f).value=p[2];
+}
+function ch1Save(){
+  usePreset('p1','w1','h1','f1');
+  var w=parseInt(document.getElementById('w1').value,10)||0;
+  var h=parseInt(document.getElementById('h1').value,10)||0;
+  var f=parseInt(document.getElementById('f1').value,10)||0;
+  if(w!==IW||h!==IH||f!==IF){
+    alert('Canale 1 è legato a Reg. video. Questi parametri sovrascrivono Reg. video con gli stessi valori.');
+  }
+  return true;
+}
+</script>
+</body></html>
+)HTML";
+
+static bool channels_read_size(const char *body, uint16_t *w, uint16_t *h, uint8_t *fps) {
+    char w_s[16] = {0};
+    char h_s[16] = {0};
+    char fps_s[8] = {0};
+    char preset[40] = {0};
+    form_get_value(body, "w", w_s, sizeof(w_s));
+    form_get_value(body, "h", h_s, sizeof(h_s));
+    form_get_value(body, "fps", fps_s, sizeof(fps_s));
+    form_get_value(body, "preset", preset, sizeof(preset));
+    unsigned pw = (unsigned)atoi(w_s);
+    unsigned ph = (unsigned)atoi(h_s);
+    unsigned pf = (unsigned)atoi(fps_s);
+    if (preset[0]) {
+        unsigned a = 0, b = 0, c = 0;
+        if (sscanf(preset, "%u,%u,%u", &a, &b, &c) == 3) {
+            pw = a;
+            ph = b;
+            pf = c;
+        }
+    }
+    const uint8_t cap = core_video_fps_ceiling((uint16_t)pw, (uint16_t)ph);
+    if (pf > cap) {
+        pf = cap;
+    }
+    if (!core_settings_video_valid((uint16_t)pw, (uint16_t)ph, (uint8_t)pf)) {
+        return false;
+    }
+    *w = (uint16_t)pw;
+    *h = (uint16_t)ph;
+    *fps = (uint8_t)pf;
+    return true;
+}
+
+static esp_err_t handle_channels_get(httpd_req_t *req) {
+    if (!is_authed(req)) {
+        return send_redirect(req, "/");
+    }
+    if (!s_settings) {
+        return send_redirect(req, "/");
+    }
+    char query[32] = {0};
+    char flash[160] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char msg[8] = {0};
+        if (httpd_query_key_value(query, "saved", msg, sizeof(msg)) == ESP_OK) {
+            if (strcmp(msg, "1") == 0) {
+                snprintf(flash, sizeof(flash), "<div class='alert ok'>Salvato.</div>");
+            } else if (strcmp(msg, "0") == 0) {
+                snprintf(flash, sizeof(flash), "<div class='alert err'>Salvataggio rifiutato.</div>");
+            }
+        }
+    }
+    char url1[80] = {0};
+    char url2[80] = {0};
+    char link1[160];
+    char link2[160];
+    core_rtsp_url_ch(1, url1, sizeof(url1));
+    core_rtsp_url_ch(2, url2, sizeof(url2));
+    if (s_settings->rtsp_always) {
+        snprintf(link1, sizeof(link1), "RTSP attivo: <code>%s</code> (anche /live)", url1);
+        snprintf(link2, sizeof(link2), "RTSP attivo: <code>%s</code>", url2);
+    } else {
+        snprintf(link1, sizeof(link1), "RTSP spento");
+        snprintf(link2, sizeof(link2), "RTSP spento");
+    }
+    const size_t cap = 12288;
+    char *html = (char *)malloc(cap);
+    if (!html) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+    }
+    int n = snprintf(html, cap, CHANNELS_HTML,
+                     web_nav(), flash,
+                     s_settings->rtsp_always ? "0" : "1",
+                     s_settings->rtsp_always ? "Disattiva RTSP (entrambi i canali)"
+                                            : "Attiva RTSP (entrambi i canali)",
+                     (unsigned)s_settings->video_width, (unsigned)s_settings->video_height,
+                     (unsigned)s_settings->video_fps, link1,
+                     (unsigned)s_settings->ch2_width, (unsigned)s_settings->ch2_height,
+                     (unsigned)s_settings->ch2_fps, link2,
+                     (unsigned)s_settings->video_width, (unsigned)s_settings->video_height,
+                     (unsigned)s_settings->video_fps);
+    if (n < 0 || n >= (int)cap) {
+        free(html);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "pagina troncata");
+    }
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+    free(html);
+    return err;
+}
+
+static esp_err_t handle_channels_post(httpd_req_t *req) {
+    if (!is_authed(req) || !s_settings) {
+        return send_redirect(req, "/");
+    }
+    char buf[512];
+    if (read_post_body(req, buf, sizeof(buf)) <= 0) {
+        return send_redirect(req, "/channels?saved=0");
+    }
+    char which[8] = {0};
+    form_get_value(buf, "channel", which, sizeof(which));
+    uint16_t w = 0;
+    uint16_t h = 0;
+    uint8_t fps = 0;
+    if (!channels_read_size(buf, &w, &h, &fps)) {
+        return send_redirect(req, "/channels?saved=0");
+    }
+    if (which[0] == '2') {
+        s_settings->ch2_width = w;
+        s_settings->ch2_height = h;
+        s_settings->ch2_fps = fps;
+    } else {
+        s_settings->video_width = w;
+        s_settings->video_height = h;
+        s_settings->video_fps = fps;
+        core_settings_video_normalize(s_settings);
+    }
+    const bool saved = core_settings_save(s_settings);
+    if (saved) {
+        core_rtsp_apply(s_settings);
+    }
+    ESP_LOGI(TAG, "Canale %s %ux%u@%u → %s", which[0] == '2' ? "2" : "1",
+             (unsigned)w, (unsigned)h, (unsigned)fps, saved ? "OK" : "FAIL");
+    return send_redirect(req, saved ? "/channels?saved=1" : "/channels?saved=0");
+}
+
+static esp_err_t handle_rtsp_switch(httpd_req_t *req) {
+    if (!is_authed(req) || !s_settings) {
+        return send_redirect(req, "/");
+    }
+    char buf[64];
+    if (read_post_body(req, buf, sizeof(buf)) <= 0) {
+        return send_redirect(req, "/channels?saved=0");
+    }
+    char on_s[4] = {0};
+    form_get_value(buf, "on", on_s, sizeof(on_s));
+    const bool on = on_s[0] == '1';
+    s_settings->rtsp_always = on;
+    const bool saved = core_settings_save(s_settings);
+    if (!saved) {
+        return send_redirect(req, "/channels?saved=0");
+    }
+    if (core_demo_is_active()) {
+        if (!core_demo_set_rtsp_view(on, s_settings)) {
+            return send_redirect(req, "/channels?saved=0");
+        }
+    } else {
+        core_rtsp_apply(s_settings);
+    }
+    ESP_LOGI(TAG, "RTSP %s (entrambi i canali)", on ? "acceso" : "spento");
+    return send_redirect(req, "/channels?saved=1");
+}
+
 static bool start_http_server(void) {
     if (s_server) return true;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CORE_WEB_PORT;
     config.stack_size = 32768;
-    config.max_uri_handlers = 64;
+    config.max_uri_handlers = 72;
     config.max_open_sockets = 7;
     config.lru_purge_enable = true;
     // Timeout corti: con WiFi ballerino i socket morti non devono restare 60 s.
@@ -7339,6 +7581,9 @@ static bool start_http_server(void) {
         {"/wifi", HTTP_POST, handle_wifi_post, nullptr},
         {"/rec_video", HTTP_GET, handle_rec_video_get, nullptr},
         {"/rec_video", HTTP_POST, handle_rec_video_post, nullptr},
+        {"/channels", HTTP_GET, handle_channels_get, nullptr},
+        {"/channels", HTTP_POST, handle_channels_post, nullptr},
+        {"/rtsp/switch", HTTP_POST, handle_rtsp_switch, nullptr},
         {"/format_sd", HTTP_POST, handle_format_sd, nullptr},
         {"/sd/remount", HTTP_POST, handle_sd_remount, nullptr},
         {"/demo/rtsp", HTTP_POST, handle_demo_rtsp, nullptr},
