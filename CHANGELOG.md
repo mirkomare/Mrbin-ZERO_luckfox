@@ -8,7 +8,7 @@ Formato basato su [Keep a Changelog](https://keepachangelog.com/it/1.0.0/).
 
 **Data/ora release:** 2026-11-04 13:49:31 +0100
 **Subversion:** `2` (serie **0.9.7-zero**, da `1` / 0.9.6-zero)
-**Commit:** `PLACEHOLDER`
+**Commit:** `27e253742ee9f2c58a4bf6d73992a8b61819da44`
 **Stato:** Stable (patch). Sorgente. `out/` e l’immagine non sono nel commit. La scheda in sessione ha già questo core, senza reflash.
 
 ### Aggiunto
