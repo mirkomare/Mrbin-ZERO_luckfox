@@ -317,6 +317,8 @@ void core_gpio_sqw_release_high(void) {
 
 static volatile bool      s_rec_stop_latched = false;
 static volatile bool      s_ignore_rec_stop = false;  // timer: STOP completamente ignorato
+/* Pin already low at session start is not a press. Arm after the first HIGH. */
+static volatile bool      s_stop_seen_high = false;
 
 static TaskHandle_t       s_stop_poll_task = nullptr;
 static volatile bool      s_stop_poll_run = false;
@@ -346,10 +348,18 @@ static void gpio_poll_stop_inputs(void) {
     }
     s_prev_d2_poll_level = d2_level;
 
-    if (core_gpio_is_mode_config()) {
-        s_rec_stop_low_since = -1;
-        s_d2_low_since = -1;
-        return;
+    /* MODE alto tiene la GUI accesa. Non blocca lo STOP della clip:
+     * D2 basso chiude la registrazione anche in config. Lo spegnimento
+     * TPL è un altro giro, sul pin MODE. */
+
+    if (!s_stop_seen_high) {
+        if (stop_level != 0) {
+            s_stop_seen_high = true;
+        } else {
+            s_rec_stop_low_since = -1;
+            s_d2_low_since = -1;
+            return;
+        }
     }
 
     int64_t now = esp_timer_get_time();
@@ -413,6 +423,7 @@ void core_gpio_rec_stop_session_begin(bool ignore_stop) {
     s_ignore_rec_stop = ignore_stop;
     s_rec_stop_low_since = -1;
     s_rec_stop_latched = false;
+    s_stop_seen_high = gpio_get_level(s_rec_stop_gpio) != 0;
     s_d2_low_since = -1;
     s_d2_led_notified = false;
     s_prev_d1_level = -1;

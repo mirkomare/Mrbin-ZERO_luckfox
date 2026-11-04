@@ -352,6 +352,42 @@ static void write_ftyp_mdat_hdr(mux_t *m) {
     m->header_written = true;
 }
 
+static int wr_annexb_as_avcc(mux_t *m, const uint8_t *in, int in_len) {
+    int sc = find_start(in, in_len, 0);
+    if (sc < 0) {
+        return -1;
+    }
+    int written = 0;
+    while (sc >= 0) {
+        int hdr = (in[sc + 2] == 1) ? 3 : 4;
+        int nal = sc + hdr;
+        int next = find_start(in, in_len, nal);
+        if (next < 0) {
+            next = in_len;
+        }
+        int sz = next - nal;
+        if (sz < 0) {
+            break;
+        }
+        uint8_t lenb[4] = {
+            (uint8_t)(sz >> 24),
+            (uint8_t)(sz >> 16),
+            (uint8_t)(sz >> 8),
+            (uint8_t)sz,
+        };
+        wr_bytes(m, lenb, 4);
+        if (sz > 0) {
+            wr_bytes(m, in + nal, sz);
+        }
+        written += 4 + sz;
+        sc = find_start(in, in_len, next);
+        if (sc >= 0 && sc < next) {
+            break;
+        }
+    }
+    return written > 0 ? written : -1;
+}
+
 esp_muxer_err_t esp_muxer_add_video_packet(esp_muxer_handle_t h, int, esp_muxer_video_packet_t *pkt) {
     mux_t *m = (mux_t *)h;
     if (!m || !pkt || !pkt->data || pkt->len <= 0) {
@@ -360,6 +396,28 @@ esp_muxer_err_t esp_muxer_add_video_packet(esp_muxer_handle_t h, int, esp_muxer_
 
     if (m->codec == ESP_MUXER_VDEC_H264) {
         scan_annexb_cfg(m, pkt->data, pkt->len);
+    }
+
+    /* Stream Annex-B into mdat. A full AVCC copy is another 1–2 MB and
+     * fails once the ring already holds an 8MP IDR, so the file stays empty. */
+    if (m->type == ESP_MUXER_TYPE_MP4 && m->codec == ESP_MUXER_VDEC_H264 &&
+        find_start(pkt->data, pkt->len, 0) >= 0) {
+        if (grow_meta(m) != 0) {
+            return -1;
+        }
+        if (!m->header_written) {
+            write_ftyp_mdat_hdr(m);
+        }
+        int plen = wr_annexb_as_avcc(m, pkt->data, pkt->len);
+        if (plen <= 0) {
+            return -1;
+        }
+        bool key = pkt->key_frame || packet_has_idr(pkt->data, pkt->len);
+        m->sizes[m->frames] = (uint32_t)plen;
+        m->pts[m->frames] = pkt->pts;
+        m->keys[m->frames] = key ? 1 : 0;
+        m->frames++;
+        return ESP_MUXER_ERR_OK;
     }
 
     uint8_t *payload = nullptr;

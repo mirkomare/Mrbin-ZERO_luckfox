@@ -35,6 +35,7 @@
 static const char *TAG = "core_sd";
 static sdmmc_card_t *s_card = nullptr;
 static bool s_mounted = false;
+static bool s_vfat_repair_used = false;
 static char s_last_mount_err[48] = {0};
 static SemaphoreHandle_t s_mount_mtx = nullptr;
 #if SOC_SDMMC_IO_POWER_EXTERNAL
@@ -219,21 +220,29 @@ static void core_sd_sync_mounted_flag(void) {
 
 static void core_sd_try_remount_rw(void) {
     core_sd_sync_mounted_flag();
-    if (!hal_sd_mount_is_readonly(CORE_SD_MOUNT_POINT)) {
+    if (!hal_sd_mount_is_readonly(CORE_SD_MOUNT_POINT) &&
+        hal_sd_probe_write(CORE_SD_MOUNT_POINT)) {
         return;
     }
-    ESP_LOGW(TAG, "SD montata in sola lettura — remount rw…");
-    if (hal_sd_remount_rw(CORE_SD_MOUNT_POINT)) {
+    ESP_LOGW(TAG, "SD non scrivibile — remount rw…");
+    if (hal_sd_remount_rw(CORE_SD_MOUNT_POINT) &&
+        hal_sd_probe_write(CORE_SD_MOUNT_POINT)) {
         ESP_LOGI(TAG, "SD di nuovo in scrittura");
         core_sd_sync_mounted_flag();
         return;
     }
-    ESP_LOGW(TAG, "Remount rw fallito — fsck.fat…");
-    if (hal_sd_repair_vfat(CORE_SD_MOUNT_POINT)) {
+    if (s_vfat_repair_used) {
+        ESP_LOGE(TAG, "SD ancora non scrivibile (niente altro fsck in questo avvio)");
+        return;
+    }
+    s_vfat_repair_used = true;
+    ESP_LOGW(TAG, "Remount rw fallito — fsck.fat -a una volta…");
+    if (hal_sd_repair_vfat(CORE_SD_MOUNT_POINT) &&
+        hal_sd_probe_write(CORE_SD_MOUNT_POINT)) {
         ESP_LOGI(TAG, "SD riparata e montata in scrittura");
         core_sd_sync_mounted_flag();
     } else {
-        ESP_LOGE(TAG, "SD ancora ro — Formatta SD da GUI o chkdsk su PC (errno 30)");
+        ESP_LOGE(TAG, "SD ancora non scrivibile");
     }
 }
 
@@ -248,14 +257,6 @@ bool core_sd_ensure_rw(void) {
         return true;
     }
     core_sd_try_remount_rw();
-    if (!hal_sd_mount_is_readonly(CORE_SD_MOUNT_POINT) &&
-        hal_sd_probe_write(CORE_SD_MOUNT_POINT)) {
-        s_mounted = true;
-        return true;
-    }
-    if (hal_sd_repair_vfat(CORE_SD_MOUNT_POINT)) {
-        core_sd_sync_mounted_flag();
-    }
     if (hal_sd_probe_write(CORE_SD_MOUNT_POINT)) {
         s_mounted = true;
         return true;

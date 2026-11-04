@@ -4,6 +4,9 @@
 #include "hal_gpio.h"
 
 #include <cstdio>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "driver/gpio.h"
 #include "esp_private/gpio.h"
@@ -50,6 +53,51 @@ static void led_sysfs_probe_max(void) {
     }
 }
 
+static int s_board_ready;
+
+static void board_led_ensure(void) {
+#ifdef _WIN32
+    return;
+#else
+    if (s_board_ready) {
+        return;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d", CORE_GPIO_BOARD_LED);
+    if (access(path, F_OK) != 0) {
+        FILE *fp = fopen("/sys/class/gpio/export", "w");
+        if (fp) {
+            fprintf(fp, "%d", CORE_GPIO_BOARD_LED);
+            fclose(fp);
+        }
+    }
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", CORE_GPIO_BOARD_LED);
+    FILE *dir = fopen(path, "w");
+    if (!dir) {
+        return;
+    }
+    fputs("out", dir);
+    fclose(dir);
+    s_board_ready = 1;
+#endif
+}
+
+static void board_led_write(int on) {
+    board_led_ensure();
+    if (!s_board_ready) {
+        return;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", CORE_GPIO_BOARD_LED);
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        return;
+    }
+    /* Gemello di scheda, attivo alto. `on` è 1 quando la luce deve essere accesa. */
+    fprintf(fp, "%d", on ? CORE_BOARD_LED_ON_LEVEL : (CORE_BOARD_LED_ON_LEVEL ? 0 : 1));
+    fclose(fp);
+}
+
 static bool led_write_sysfs(int level) {
     const char *led = hal_gpio_sysfs_led();
     if (!led) {
@@ -78,6 +126,8 @@ static void led_ensure_output(void) {
 }
 
 static void led_write(int level) {
+    const int on = (level == CORE_STATUS_LED_ON_LEVEL);
+    board_led_write(on);
     if (led_write_sysfs(level)) {
         return;
     }
@@ -133,7 +183,7 @@ static void led_task(void *) {
             break;
 
         case CORE_LED_AP:
-            led_pulse_ms(150);
+            led_pulse_ms(CORE_STATUS_LED_AP_ON_MS);
             vTaskDelay(pdMS_TO_TICKS(CORE_STATUS_LED_AP_BLINK_MS));
             break;
 
@@ -151,22 +201,11 @@ static void led_task(void *) {
         }
 
         case CORE_LED_RECORDING:
-            if (core_demo_is_active()) {
-                led_write(CORE_STATUS_LED_ON_LEVEL);
-                vTaskDelay(pdMS_TO_TICKS(500));
-                break;
-            }
-            if (s_sd_ready_pulse) {
-                s_sd_ready_pulse = false;
-                led_pulse_ms(CORE_STATUS_LED_D2_PULSE_MS);
-            }
-            if (s_rec_sd_writing) {
-                led_pulse_ms(CORE_STATUS_LED_SAVING_ON_MS);
-                vTaskDelay(pdMS_TO_TICKS(CORE_STATUS_LED_SAVING_OFF_MS));
-            } else {
-                led_write(CORE_STATUS_LED_ON_LEVEL);
-                vTaskDelay(pdMS_TO_TICKS(500));
-            }
+            /* Fisso acceso. Il lampeggio è solo in SAVING, a file chiuso. */
+            s_sd_ready_pulse = false;
+            (void)s_rec_sd_writing;
+            led_write(CORE_STATUS_LED_ON_LEVEL);
+            vTaskDelay(pdMS_TO_TICKS(200));
             break;
 
         case CORE_LED_D2_DETECT: {
@@ -246,8 +285,13 @@ bool core_status_led_init(void) {
         return false;
     }
 
-    ESP_LOGI(TAG, "LED GPIO%d pronto (task prio %d)", CORE_GPIO_STATUS_LED, CORE_STATUS_LED_TASK_PRIO);
+    ESP_LOGI(TAG, "LED esterni gemelli GPIO%d e GPIO%d (task prio %d)",
+             CORE_GPIO_STATUS_LED, CORE_GPIO_BOARD_LED, CORE_STATUS_LED_TASK_PRIO);
     return true;
+}
+
+core_status_led_mode_t core_status_led_current(void) {
+    return led_get_mode();
 }
 
 void core_status_led_set_mode(core_status_led_mode_t mode) {
@@ -273,6 +317,10 @@ void core_status_led_set_mode(core_status_led_mode_t mode) {
 }
 
 void core_status_led_notify_sta_connected(void) {
+    core_status_led_mode_t mode = led_get_mode();
+    if (mode == CORE_LED_RECORDING || mode == CORE_LED_SAVING) {
+        return;
+    }
     core_status_led_set_mode(CORE_LED_STA_CONNECTED);
 }
 
@@ -292,9 +340,6 @@ void core_status_led_notify_d2_detected(void) {
 }
 
 void core_status_led_notify_rec_stop(void) {
-    if (core_demo_is_active()) {
-        return;
-    }
     s_rec_stop_pending = true;
     if (!s_mode_mtx) {
         led_write(s_off_level);
@@ -329,17 +374,9 @@ void core_status_led_notify_rec_sd_writing(bool writing) {
 }
 
 void core_status_led_end_recording(bool config_session) {
-    core_status_led_mode_t next = CORE_LED_OFF;
-    if (config_session && core_demo_is_active()) {
-        next = CORE_LED_OFF;
-    } else if (config_session) {
-        if (s_restore_mode == CORE_LED_AP || s_restore_mode == CORE_LED_STA_CONNECTED ||
-            s_restore_mode == CORE_LED_ERROR) {
-            next = s_restore_mode;
-        } else {
-            next = CORE_LED_AP;
-        }
-    }
+    (void)config_session;
+    /* Dopo il file: spento. Se siamo in AP il lampeggio lento riprende. */
+    core_status_led_mode_t next = (s_restore_mode == CORE_LED_AP) ? CORE_LED_AP : CORE_LED_OFF;
     s_rec_stop_pending = false;
     s_rec_sd_writing = false;
     core_status_led_set_mode(next);

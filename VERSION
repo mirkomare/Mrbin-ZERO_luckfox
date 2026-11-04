@@ -1,5 +1,5 @@
-0.9.7-zero
-2
+0.9.8-zero
+3
 # Port Luckfox Pico Zero, sensore IMX415.
-# Subversion 2 (da 1 / 0.9.6-zero): live sempre acceso, RTSP su due canali, QP sul movimento.
+# Subversion 3 (da 2 / 0.9.7-zero): DEMO spenta di default, LED, RTSP escluso dal file, video a 3072x1728.
 # Policy: saltare sempre numeri di versione e subversione 13 e 17.

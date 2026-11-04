@@ -324,6 +324,20 @@ bool core_h264_buffer_init_recording(core_h264_buffer_t *buf, bool pir_fast, boo
         pool_size = CORE_PIR_H264_RING_BYTES;
     } else {
         pool_size = core_h264_buffer_pool_bytes();
+        /* Web/config clips are the Reg. video size (up to 8MP). One IDR
+         * does not fit in the 40% slice when SPIRAM left is ~2 MB — every
+         * frame was dropped and no MP4 was written. Hold one keyframe. */
+        const uint32_t want = 1536U * 1024U;
+        uint32_t room = 0;
+        if (free_before > 384U * 1024U) {
+            room = (uint32_t)(free_before - 384U * 1024U);
+        }
+        if (room > 4U * 1024U * 1024U) {
+            room = 4U * 1024U * 1024U;
+        }
+        if (pool_size < want && room > pool_size) {
+            pool_size = (room < want) ? room : want;
+        }
     }
     if (!core_h264_buffer_init_pool(buf, pool_size)) {
         return false;
@@ -454,15 +468,58 @@ bool core_h264_buffer_pop_head(core_h264_buffer_t *buf) {
 
 
 
+/* Empty ring and a frame bigger than the pool: the 8MP IDR is the
+ * whole clip. Grow once, up to 4 MB, instead of dropping every NAL. */
+static bool pool_grow_for_frame(core_h264_buffer_t *buf, uint32_t size) {
+    if (!buf || buf->frame_count != 0 || size == 0 || size > 4U * 1024U * 1024U) {
+        return false;
+    }
+    if (buf->pool && buf->pool_size >= size) {
+        return true;
+    }
+    uint32_t need = (size + 4095U) & ~4095U;
+    uint8_t *p = (uint8_t *)heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p && buf->pool) {
+        heap_caps_free(buf->pool);
+        buf->pool = nullptr;
+        buf->pool_size = 0;
+        buf->pool_used = 0;
+        buf->pool_reclaim = 0;
+        p = (uint8_t *)heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!p) {
+        return false;
+    }
+    if (buf->pool) {
+        heap_caps_free(buf->pool);
+    }
+    buf->pool = p;
+    buf->pool_size = need;
+    buf->pool_used = 0;
+    buf->pool_reclaim = 0;
+    ESP_LOGW(TAG, "Pool allargato a %lu KB (frame %lu B)",
+             (unsigned long)(need / 1024U), (unsigned long)size);
+    return true;
+}
+
 bool core_h264_buffer_push(core_h264_buffer_t *buf, uint32_t pts_ms, const uint8_t *data, uint32_t size) {
 
-    if (!buf || !buf->pool || !data || size == 0) {
+    if (!buf || !data || size == 0) {
+
+        return false;
+
+    }
+
+    if (!buf->pool && !pool_grow_for_frame(buf, size)) {
 
         return false;
 
     }
 
     if (!pool_ensure_space(buf, size)) {
+
+        if (!(buf->frame_count == 0 && pool_grow_for_frame(buf, size) &&
+              pool_ensure_space(buf, size))) {
 
         ESP_LOGW(TAG, "Pool PSRAM pieno (%u%%, %lu / %lu KB, %lu frame)",
 
@@ -475,6 +532,8 @@ bool core_h264_buffer_push(core_h264_buffer_t *buf, uint32_t pts_ms, const uint8
                  (unsigned long)buf->frame_count);
 
         return false;
+
+        }
 
     }
 

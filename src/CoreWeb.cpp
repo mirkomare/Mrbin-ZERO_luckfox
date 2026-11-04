@@ -143,13 +143,22 @@ static void web_clocks_html(char *out, size_t out_len, bool link_rtc_page) {
                  : "");
 }
 
+/* In DEMO lo streamer parte spento anche se la NVS è accesa: il pulsante segue
+ * quello che sta davvero uscendo, non solo il valore salvato. */
+static int web_rtsp_on(void) {
+    if (core_demo_is_active()) {
+        return core_demo_rtsp_view() ? 1 : 0;
+    }
+    return (s_settings && s_settings->rtsp_always) ? 1 : 0;
+}
+
 // Nav dinamica: link RTC solo se DS3231 + AT24C32 rispondono.
 static const char *web_nav(void) {
-    static char nav[4096];
+    static char nav[8192];
     const char *hw_link = core_rtc_hw_status_monitoring_enabled()
                               ? "<a href=\"/hw_status\">Stato HW</a>"
                               : "";
-    const char *demo = core_demo_html_banner();
+    const char *demo = core_demo_html_banner(web_rtsp_on());
     if (core_alarm_schedule_hw_available()) {
         snprintf(nav, sizeof(nav),
                  "%s<nav><a href=\"/settings\">Impostazioni</a><a href=\"/wifi\">WiFi</a><a href=\"/live\">Live</a>"
@@ -991,8 +1000,8 @@ fieldset legend{font-weight:600;padding:0 6px}
 static const char *REC_VIDEO_FORM_TAIL = R"HTML(
 <p class="hint">Camera <strong>IMX415</strong> (8 MP) + <strong>RV1106</strong> VENC H.264.
 Nativo sensore: <strong>3840×2160</strong>. Default <strong>1920×1080 @ 30 fps</strong>.
-Dal FullHD fino a 8 MP: 2304×1296, 2560×1440, 2880×1620 (ancora a 30 fps),
-3072×1728 e 3840×2160 a <strong>15 fps</strong> (sopra i 5 MP).
+Dal FullHD fino a 2880×1620 a 30 fps. Sopra i 5 MP il tetto è <strong>15 fps</strong>.
+3840×2160 non esce dall'ISP di questa scheda: quel preset registra <strong>3072×1728</strong>.
 Restano 720p, VGA e 1280×960. Il Live resta anteprima 640×480 MJPEG.
 Si applica al prossimo avvio registrazione (PIR o web).</p>
 <form method="POST" action="/rec_video" id="videoForm" onsubmit="return syncBeforeSave()">
@@ -1011,9 +1020,9 @@ Per la massima definizione usa <strong>3840×2160</strong>. Con cifratura attiva
 <label>Preset</label>
 <select name="video_preset" id="preset" onchange="applyPreset()">
 <option value="">— personalizzato —</option>
-<optgroup label="8 MP nativo — H.264 (3840×2160, max 15 fps)">
-<option value="3840,2160,15">3840×2160 @ 15 fps (8 MP)</option>
-<option value="3840,2160,10">3840×2160 @ 10 fps</option>
+<optgroup label="Massimo ISP — H.264 (3072×1728, il preset 3840 registra così)">
+<option value="3840,2160,15">3840×2160 → 3072×1728 @ 15 fps</option>
+<option value="3840,2160,10">3840×2160 → 3072×1728 @ 10 fps</option>
 </optgroup>
 <optgroup label="Oltre 5 MP — H.264 (3072×1728, max 15 fps)">
 <option value="3072,1728,15">3072×1728 @ 15 fps</option>
@@ -1863,6 +1872,12 @@ static esp_err_t handle_live_record_start(httpd_req_t *req) {
         snprintf(json, sizeof(json), "{\"ok\":false,\"msg\":\"Impostazioni non disponibili\"}");
         return send_json(req, json);
     }
+    if (core_rtsp_pipe_up()) {
+        snprintf(json, sizeof(json),
+                 "{\"ok\":false,\"msg\":\"RTSP attivo — spegnilo per registrare in locale. "
+                 "Insieme tagliano gli fps.\"}");
+        return send_json(req, json);
+    }
     if (!core_sd_is_mounted() && !core_sd_init()) {
         snprintf(json, sizeof(json), "{\"ok\":false,\"msg\":\"SD non montata\"}");
         return send_json(req, json);
@@ -1995,12 +2010,46 @@ static esp_err_t handle_live_record_stop(httpd_req_t *req) {
 static int read_post_body(httpd_req_t *req, char *buf, size_t buf_len);
 static bool form_get_value(const char *body, const char *name, char *out, size_t out_len);
 
+static bool web_apply_rtsp(bool on) {
+    if (!s_settings) {
+        return false;
+    }
+    if (on && core_recorder_manual_is_active()) {
+        ESP_LOGI(TAG, "RTSP acceso — chiudo la registrazione locale");
+        core_recorder_manual_stop();
+    }
+    s_settings->rtsp_always = on;
+    if (!core_settings_save(s_settings)) {
+        return false;
+    }
+    if (core_demo_is_active()) {
+        if (!core_demo_set_rtsp_view(on, s_settings)) {
+            return false;
+        }
+    } else {
+        core_rtsp_apply(s_settings);
+    }
+    if (on) {
+        for (int i = 0; i < 80 && !core_rtsp_pipe_up(); ++i) {
+            if (core_recorder_manual_is_active() && i > 5) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    } else {
+        for (int i = 0; i < 15 && core_rtsp_pipe_up(); ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    return true;
+}
+
 static esp_err_t handle_demo_rtsp(httpd_req_t *req) {
     if (!is_authed(req)) {
         return send_json_unauth(req);
     }
-    if (!s_settings || !core_demo_is_active()) {
-        return send_json(req, "{\"ok\":false,\"msg\":\"DEMO non attiva\"}");
+    if (!s_settings) {
+        return send_json(req, "{\"ok\":false,\"msg\":\"Impostazioni assenti\"}");
     }
     char buf[32] = {0};
     if (read_post_body(req, buf, sizeof(buf)) <= 0) {
@@ -2009,18 +2058,22 @@ static esp_err_t handle_demo_rtsp(httpd_req_t *req) {
     char on_s[4] = {0};
     form_get_value(buf, "on", on_s, sizeof(on_s));
     const bool on = on_s[0] == '1';
-    s_settings->rtsp_always = on;
-    if (!core_settings_save(s_settings)) {
-        return send_json(req, "{\"ok\":false,\"msg\":\"NVS non salvata\"}");
-    }
-    if (!core_demo_set_rtsp_view(on, s_settings)) {
+    if (!web_apply_rtsp(on)) {
         return send_json(req, "{\"ok\":false,\"msg\":\"RTSP non commutato\"}");
     }
-    char url[80];
-    core_rtsp_url(url, sizeof(url));
-    char json[160];
-    snprintf(json, sizeof(json), "{\"ok\":true,\"on\":%s,\"url\":\"%s\"}",
-             core_demo_rtsp_view() ? "true" : "false", url);
+    char url1[80];
+    char url2[80];
+    core_rtsp_url_ch(1, url1, sizeof(url1));
+    core_rtsp_url_ch(2, url2, sizeof(url2));
+    char json[320];
+    const bool streaming = on && core_rtsp_pipe_up();
+    if (on) {
+        snprintf(json, sizeof(json),
+                 "{\"ok\":true,\"on\":true,\"streaming\":%s,\"url\":\"%s\",\"url2\":\"%s\"}",
+                 streaming ? "true" : "false", url1, url2);
+    } else {
+        snprintf(json, sizeof(json), "{\"ok\":true,\"on\":false}");
+    }
     return send_json(req, json);
 }
 
@@ -2276,6 +2329,7 @@ typedef struct {
     char when_h[40];   // "25/07/2026 14:30:52" o solo data
     char detail_h[64]; // "1:05 · 780 frame · 12.3 MB"
     char size_h[32];
+    char stamp[16]; /* YYYYMMDDHHMMSS, newest first */
     uint32_t duration_sec;
     uint32_t frames;
     bool pending;
@@ -2663,19 +2717,58 @@ static bool videos_name_is_listable_media(const char *name, bool *is_mp4, bool *
     }
     bool mp4 = (!tmp && name_len >= 4 && strcmp(name + name_len - 4, ".mp4") == 0);
     bool avi = (name_len >= 4 && strcmp(name + name_len - 4, ".avi") == 0);
+    /* Elementary .h264 from the recorder. Not .h264.aes / .h264.info. */
+    bool h264 = (!tmp && name_len >= 5 && strcmp(name + name_len - 5, ".h264") == 0);
     if (is_mp4) {
         *is_mp4 = mp4;
     }
     if (is_avi) {
         *is_avi = avi;
     }
-    return tmp || mp4 || avi;
+    return tmp || mp4 || avi || h264;
+}
+
+static void video_stamp_fill(const char *fname, const struct stat *fst, char *out, size_t out_len) {
+    if (!out || out_len < 15) {
+        return;
+    }
+    out[0] = 0;
+    if (fname) {
+        for (const char *p = fname; *p; ++p) {
+            if (*p != '_' || strlen(p) < 16 || p[9] != '_') {
+                continue;
+            }
+            bool digits = true;
+            for (int i = 1; i <= 8; ++i) {
+                if (p[i] < '0' || p[i] > '9') {
+                    digits = false;
+                }
+            }
+            for (int i = 10; i <= 15; ++i) {
+                if (p[i] < '0' || p[i] > '9') {
+                    digits = false;
+                }
+            }
+            if (!digits) {
+                continue;
+            }
+            memcpy(out, p + 1, 8);
+            memcpy(out + 8, p + 10, 6);
+            out[14] = 0;
+            return;
+        }
+    }
+    struct tm t;
+    time_t mt = fst ? fst->st_mtime : 0;
+    localtime_r(&mt, &t);
+    snprintf(out, out_len, "%04d%02d%02d%02d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+             t.tm_hour, t.tm_min, t.tm_sec);
 }
 
 static bool videos_list_push_file(video_list_item_t *items, size_t *count, size_t max_items,
                                   const char *rel, const char *when_day8, const char *fname,
                                   const char *fpath, bool mrbin_flat_when) {
-    if (!items || !count || !rel || !fname || !fpath || *count >= max_items) {
+    if (!items || !count || !rel || !fname || !fpath || max_items == 0) {
         return false;
     }
     bool is_tmp = false;
@@ -2692,8 +2785,39 @@ static bool videos_list_push_file(video_list_item_t *items, size_t *count, size_
     if (!is_tmp && fst.st_size < min_sz) {
         return false;
     }
+    /* Same clip is also written as .mp4. Show the MP4, keep lone .h264. */
+    if (!is_tmp && !is_mp4 && !is_avi) {
+        size_t flen = strlen(fpath);
+        if (flen >= 5 && flen < 192) {
+            char mp4path[192];
+            memcpy(mp4path, fpath, flen - 5);
+            memcpy(mp4path + flen - 5, ".mp4", 5);
+            struct stat mp4st;
+            if (stat(mp4path, &mp4st) == 0 && S_ISREG(mp4st.st_mode) &&
+                mp4st.st_size >= (off_t)CORE_CRYPTO_FILE_HEADER) {
+                return false;
+            }
+        }
+    }
 
-    video_list_item_t *it = &items[(*count)++];
+    char stamp[16];
+    video_stamp_fill(fname, &fst, stamp, sizeof(stamp));
+    video_list_item_t *it = nullptr;
+    if (*count >= max_items) {
+        size_t worst = 0;
+        for (size_t i = 1; i < *count; ++i) {
+            if (strcmp(items[i].stamp, items[worst].stamp) < 0) {
+                worst = i;
+            }
+        }
+        if (strcmp(stamp, items[worst].stamp) <= 0) {
+            return false;
+        }
+        it = &items[worst];
+    } else {
+        it = &items[(*count)++];
+    }
+    snprintf(it->stamp, sizeof(it->stamp), "%s", stamp);
     snprintf(it->rel, sizeof(it->rel), "%s", rel);
     if (when_day8) {
         snprintf(it->day, sizeof(it->day), "%s", when_day8);
@@ -3204,6 +3328,10 @@ static esp_err_t photos_send_jpeg_file(httpd_req_t *req, const char *rel, bool a
 static int video_list_item_cmp_desc(const void *a, const void *b) {
     const video_list_item_t *va = (const video_list_item_t *)a;
     const video_list_item_t *vb = (const video_list_item_t *)b;
+    int c = strcmp(vb->stamp, va->stamp);
+    if (c != 0) {
+        return c;
+    }
     return strcmp(vb->rel, va->rel);
 }
 
@@ -3289,7 +3417,8 @@ static bool video_rel_path_valid(const char *rel) {
             return false;
         }
         bool ok_ext = (strcmp(name + name_len - 4, ".mp4") == 0) ||
-                      (name_len >= 4 && strcmp(name + name_len - 4, ".avi") == 0);
+                      (name_len >= 4 && strcmp(name + name_len - 4, ".avi") == 0) ||
+                      (name_len >= 5 && strcmp(name + name_len - 5, ".h264") == 0);
         if (!ok_ext) {
             return false;
         }
@@ -3315,7 +3444,8 @@ static bool video_rel_path_valid(const char *rel) {
         return false;
     }
     bool ok_ext = (strcmp(name + name_len - 4, ".mp4") == 0) ||
-                  (name_len >= 4 && strcmp(name + name_len - 4, ".avi") == 0);
+                  (name_len >= 4 && strcmp(name + name_len - 4, ".avi") == 0) ||
+                  (name_len >= 5 && strcmp(name + name_len - 5, ".h264") == 0);
     if (!ok_ext) {
         return false;
     }
@@ -3448,13 +3578,9 @@ static bool video_delete_rel(const char *rel) {
     if (!S_ISREG(st.st_mode)) {
         return false;
     }
-    if (remove(path) != 0) {
-        const int e1 = errno;
-        (void)core_sd_ensure_rw();
-        if (remove(path) != 0 && errno != ENOENT) {
-            ESP_LOGE(TAG, "remove %s fallito (errno=%d, primo=%d)", path, errno, e1);
-            return false;
-        }
+    if (remove(path) != 0 && errno != ENOENT) {
+        ESP_LOGE(TAG, "remove %s fallito (errno=%d)", path, errno);
+        return false;
     }
     ESP_LOGI(TAG, "Video eliminato: %s", path);
     {
@@ -3514,6 +3640,11 @@ static size_t videos_delete_all_mp4(void) {
     video_list_item_t *items = (video_list_item_t *)web_alloc_psram(
         VIDEOS_LIST_MAX * sizeof(video_list_item_t));
     if (!items) {
+        return 0;
+    }
+    if (!core_sd_ensure_rw()) {
+        free(items);
+        ESP_LOGE(TAG, "Eliminazione video: SD non scrivibile");
         return 0;
     }
     size_t count = videos_collect_list(items, VIDEOS_LIST_MAX);
@@ -3645,7 +3776,7 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         (unsigned)CORE_REC_SESSION_SEC_MIN, (unsigned)CORE_REC_SESSION_SEC_MAX,
         (unsigned long)sess_sec);
 
-    char body[12288];
+    char body[14336];
     char fw_rel[80];
     web_firmware_release_html(fw_rel, sizeof(fw_rel));
     uint32_t rec_max_min = s_settings
@@ -3687,6 +3818,10 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         "(<code>REC_SECONDS</code>). Con <strong>durata fissa</strong>: durata massima di un "
         "singolo file su SD se la sessione è più lunga. "
         "Resta sotto i <strong>%d min</strong> del TPL5110.</p>"
+        "<fieldset><legend>DEMO</legend>"
+        "<label><input type='checkbox' name='demo_en' value='1'%s> Attiva modalità DEMO</label>"
+        "<p class='hint'>Spenta di default. Vale dal prossimo avvio: in CONFIG registra sul movimento "
+        "e non spegne da sola. GPIO59 a massa da solo non la accende.</p></fieldset>"
         "<label>Delay dopo pin stop (ms, %u–%u)</label><input name='d2_delay' type='number' min='%u' max='%u' value='%lu'>"
         "<label>WiFi SSID</label><input name='wifi_ssid' value='%s'>"
         "<label>WiFi Password</label><input name='wifi_pass' type='password' value='%s'>"
@@ -3716,6 +3851,7 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
         (unsigned)(CORE_REC_MAX_DURATION_SEC_MAX / 60U),
         (unsigned long)rec_max_min,
         CORE_TPL_ON_MAX_MINUTES,
+        (s_settings && s_settings->demo_enable) ? " checked" : "",
         (unsigned)CORE_D2_DELAY_MIN_MS,
         (unsigned)CORE_D2_DELAY_MAX_MS,
         (unsigned)CORE_D2_DELAY_MIN_MS,
@@ -3742,6 +3878,7 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
 
     char id_s[16] = {0}, delay_s[16] = {0}, max_min_s[16] = {0}, ssid[64] = {0}, pass[128] = {0};
     char start_s[8] = {0}, stop_s[8] = {0}, stop_mode_s[8] = {0}, sess_sec_s[16] = {0};
+    char demo_s[8] = {0};
     form_get_value(buf, "core_id", id_s, sizeof(id_s));
     form_get_value(buf, "d2_delay", delay_s, sizeof(delay_s));
     form_get_value(buf, "rec_max_min", max_min_s, sizeof(max_min_s));
@@ -3751,6 +3888,9 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
     form_get_value(buf, "rec_session_sec", sess_sec_s, sizeof(sess_sec_s));
     form_get_value(buf, "wifi_ssid", ssid, sizeof(ssid));
     form_get_value(buf, "wifi_pass", pass, sizeof(pass));
+    form_get_value(buf, "demo_en", demo_s, sizeof(demo_s));
+    /* Checkbox assente nel POST = spenta. */
+    s_settings->demo_enable = (demo_s[0] == '1');
 
     bool delay_ok = false;
     bool max_dur_ok = false;
@@ -3821,9 +3961,9 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
     snprintf(s_settings->wifi_ssid, sizeof(s_settings->wifi_ssid), "%s", ssid);
     snprintf(s_settings->wifi_pass, sizeof(s_settings->wifi_pass), "%s", pass);
 
-    ESP_LOGI(TAG, "POST settings: stop_mode=%u sess=%lu s max_min=%lu (raw mode='%s' sess='%s')",
+    ESP_LOGI(TAG, "POST settings: stop_mode=%u sess=%lu s max_min=%lu demo_en=%d (raw mode='%s' sess='%s')",
              (unsigned)s_settings->rec_stop_mode, (unsigned long)s_settings->rec_session_sec,
-             (unsigned long)max_min, stop_mode_s, sess_sec_s);
+             (unsigned long)max_min, s_settings->demo_enable ? 1 : 0, stop_mode_s, sess_sec_s);
 
     if (!stop_ok) {
         return send_redirect(req, "/settings?saved=0");
@@ -4345,7 +4485,9 @@ static esp_err_t handle_videos_get(httpd_req_t *req) {
         const char *pir_ico = (strncmp(it->rel, "mrbin/", 6) == 0)
                                   ? "<span class='vid-lock-ico' title='Clip PIR (/sdcard/mrbin)'>PIR</span>"
                                   : "";
-        const char *kind_ico = (strstr(it->rel, ".avi") != nullptr) ? "AVI" : "MP4";
+        const char *kind_ico = (strstr(it->name, ".h264") != nullptr) ? "H264"
+                                   : (strstr(it->name, ".avi") != nullptr) ? "AVI"
+                                                                            : "MP4";
         off += snprintf(body + off, body_cap - off,
             "<li class='vid-row'>"
             "<div class='vid-preview vid-icon'>%s</div>"
@@ -4367,7 +4509,7 @@ static esp_err_t handle_videos_get(httpd_req_t *req) {
     }
     if (file_count == 0) {
         off += snprintf(body + off, body_cap - off,
-                        "<li class='vid-empty'>Nessun video (MP4/AVI) trovato "
+                        "<li class='vid-empty'>Nessun video (MP4, AVI o H264) trovato "
                         "(cartelle data o <code>mrbin/</code>).</li>");
     } else if (truncated) {
         off += snprintf(body + off, body_cap - off,
@@ -4740,8 +4882,10 @@ static esp_err_t stream_plain_mp4_body(httpd_req_t *req, FILE *fp, const char *r
 
     const char *status = has_range ? "206 Partial Content" : "200 OK";
     bool is_avi = (strstr(rel, ".avi") != nullptr);
+    bool is_h264 = (strstr(rel, ".h264") != nullptr);
     const char *ctype = as_download ? "application/octet-stream"
-                                    : (is_avi ? "video/x-msvideo" : "video/mp4");
+                                    : (is_h264 ? "video/H264"
+                                               : (is_avi ? "video/x-msvideo" : "video/mp4"));
     char content_range[80] = {0};
     const char *cr_ptr = nullptr;
     char disposition[160] = {0};
@@ -6122,10 +6266,13 @@ static void wifi_disable_power_save(void) {
 
 static void wifi_ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        const bool first = !s_sta_has_ip;
         s_sta_has_ip = true;
         wifi_disable_power_save();
-        ESP_LOGI(TAG, "WiFi STA connesso — lampeggio LED x3");
-        core_status_led_notify_sta_connected();
+        if (first) {
+            ESP_LOGI(TAG, "WiFi STA connesso — tre lampeggi da 1 s, poi spento");
+            core_status_led_notify_sta_connected();
+        }
     }
 }
 
@@ -7333,7 +7480,7 @@ fieldset{border:1px solid #ccc;border-radius:8px;padding:12px 16px;margin:16px 0
 <label>Preset</label>
 <select name="preset" id="p1" onchange="usePreset('p1','w1','h1','f1')">
 <option value="">— personalizzato —</option>
-<option value="3840,2160,15">3840×2160 @ 15 fps</option>
+<option value="3840,2160,15">3840×2160 → 3072×1728 @ 15 fps</option>
 <option value="3072,1728,15">3072×1728 @ 15 fps</option>
 <option value="2560,1440,30">2560×1440 @ 30 fps</option>
 <option value="2304,1296,30">2304×1296 @ 30 fps</option>
@@ -7457,9 +7604,12 @@ static esp_err_t handle_channels_get(httpd_req_t *req) {
     char link2[160];
     core_rtsp_url_ch(1, url1, sizeof(url1));
     core_rtsp_url_ch(2, url2, sizeof(url2));
-    if (s_settings->rtsp_always) {
+    if (core_rtsp_pipe_up()) {
         snprintf(link1, sizeof(link1), "RTSP attivo: <code>%s</code> (anche /live)", url1);
         snprintf(link2, sizeof(link2), "RTSP attivo: <code>%s</code>", url2);
+    } else if (web_rtsp_on()) {
+        snprintf(link1, sizeof(link1), "RTSP non in funzione — encoder fermo");
+        snprintf(link2, sizeof(link2), "RTSP non in funzione — encoder fermo");
     } else {
         snprintf(link1, sizeof(link1), "RTSP spento");
         snprintf(link2, sizeof(link2), "RTSP spento");
@@ -7471,9 +7621,9 @@ static esp_err_t handle_channels_get(httpd_req_t *req) {
     }
     int n = snprintf(html, cap, CHANNELS_HTML,
                      web_nav(), flash,
-                     s_settings->rtsp_always ? "0" : "1",
-                     s_settings->rtsp_always ? "Disattiva RTSP (entrambi i canali)"
-                                            : "Attiva RTSP (entrambi i canali)",
+                     web_rtsp_on() ? "0" : "1",
+                     web_rtsp_on() ? "Disattiva RTSP (entrambi i canali)"
+                                   : "Attiva RTSP (entrambi i canali)",
                      (unsigned)s_settings->video_width, (unsigned)s_settings->video_height,
                      (unsigned)s_settings->video_fps, link1,
                      (unsigned)s_settings->ch2_width, (unsigned)s_settings->ch2_height,
@@ -7537,19 +7687,11 @@ static esp_err_t handle_rtsp_switch(httpd_req_t *req) {
     char on_s[4] = {0};
     form_get_value(buf, "on", on_s, sizeof(on_s));
     const bool on = on_s[0] == '1';
-    s_settings->rtsp_always = on;
-    const bool saved = core_settings_save(s_settings);
-    if (!saved) {
+    if (!web_apply_rtsp(on)) {
         return send_redirect(req, "/channels?saved=0");
     }
-    if (core_demo_is_active()) {
-        if (!core_demo_set_rtsp_view(on, s_settings)) {
-            return send_redirect(req, "/channels?saved=0");
-        }
-    } else {
-        core_rtsp_apply(s_settings);
-    }
-    ESP_LOGI(TAG, "RTSP %s (entrambi i canali)", on ? "acceso" : "spento");
+    ESP_LOGI(TAG, "RTSP %s (entrambi i canali, encoder %s)",
+             on ? "acceso" : "spento", core_rtsp_pipe_up() ? "su" : "fermo");
     return send_redirect(req, "/channels?saved=1");
 }
 

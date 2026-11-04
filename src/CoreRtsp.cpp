@@ -929,6 +929,12 @@ static void pipe_task(void *arg) {
         }
         if (want_open) {
             if (open_local) {
+                /* Channel 2 holds selfpath. Closing main while it is up
+                 * skips DisableChn and the next SetChnAttr (new Reg. video
+                 * size) stalls the ISP. Stop channel 2 first so DisableChn
+                 * can return. Luma on selfpath is left alone: start refuses
+                 * the size change instead of DisableChn under it. */
+                hal_sub_stop();
                 pipe_close();
                 open_local = 0;
                 lock_mu();
@@ -1318,6 +1324,11 @@ static void remember(const core_settings_t *settings) {
 }
 
 void core_rtsp_apply(const core_settings_t *settings) {
+    /* Sync boot brings up the GUI without core_rtsp_start. The button used
+     * to flip the flag only: no socket and no encoder tasks, so RTSP stayed
+     * dead. Start the listener once, after remember(), so the first toggle
+     * has a server. start() calls apply() only when already started. */
+    const int need_start = !s_started;
     remember(settings);
 #ifndef _WIN32
     if (s_always) {
@@ -1329,6 +1340,9 @@ void core_rtsp_apply(const core_settings_t *settings) {
         ESP_LOGI(TAG, "RTSP spento");
     }
 #endif
+    if (need_start) {
+        core_rtsp_start(settings);
+    }
 }
 
 void core_rtsp_start(const core_settings_t *settings) {

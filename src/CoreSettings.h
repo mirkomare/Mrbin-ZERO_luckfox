@@ -33,6 +33,7 @@ typedef struct {
     uint8_t  osd_x_pct;         // 0–100: posizione angolo alto-sx (%% larghezza frame)
     uint8_t  osd_y_pct;         // 0–100: posizione angolo alto-sx (%% altezza frame)
     bool     rtsp_always;       // true: entrambi i canali RTSP accesi (pulsante)
+    bool     demo_enable;       // true: DEMO in CONFIG. Default false, pagina Impostazioni
     uint16_t ch2_width;         // canale 2: solo movimento e RTSP
     uint16_t ch2_height;
     uint8_t  ch2_fps;

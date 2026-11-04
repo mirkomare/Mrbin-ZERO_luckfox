@@ -8,7 +8,8 @@ extern "C" {
 #endif
 
 /* Listener on :554 (or :8554). Both encoders run only when rtsp_always is set.
- * A client does not start them. /live is channel 1. */
+ * A client does not start them. /live is channel 1.
+ * La registrazione locale non usa questo streamer: RTSP e file non insieme. */
 void core_rtsp_start(const core_settings_t *settings);
 void core_rtsp_apply(const core_settings_t *settings);
 

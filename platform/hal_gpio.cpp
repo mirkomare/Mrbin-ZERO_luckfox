@@ -8,6 +8,7 @@
 #ifndef _WIN32
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #endif
 
 gpio_dev_t GPIO;
@@ -225,6 +226,34 @@ static int remap_line(int logical) {
     return hal_gpio_line(logical);
 }
 
+/* RV1106 IOC (non il GRF). Il default del pin è pull-down: a riposo legge 0
+ * e un filo a GND non è un evento. Pull-up = 1 nel campo a 2 bit, con
+ * write-enable nei bit alti. Vale solo per il banco GPIO1. */
+static void rv1106_gpio1_pull_up(int linux_gpio) {
+#ifndef _WIN32
+    if (linux_gpio < 32 || linux_gpio > 63 || s_host) {
+        return;
+    }
+    const int pin = linux_gpio - 32;
+    const uint32_t reg = 0x1C0u + (uint32_t)(pin / 8) * 4u;
+    const int bit = (pin % 8) * 2;
+    const uint32_t data = (0x3u << (bit + 16)) | (0x1u << bit);
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        return;
+    }
+    void *page = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0xff538000);
+    if (page != MAP_FAILED) {
+        volatile uint32_t *addr = (volatile uint32_t *)((char *)page + reg);
+        *addr = data;
+        munmap(page, 4096);
+    }
+    close(fd);
+#else
+    (void)linux_gpio;
+#endif
+}
+
 static void apply_one(int logical, gpio_mode_t mode) {
     int n = remap_line(logical);
     if (n < 0 || n >= HAL_GPIO_LINE_MAX) return;
@@ -236,6 +265,11 @@ static void apply_one(int logical, gpio_mode_t mode) {
             sysfs_dir(n, "out");
         } else {
             sysfs_dir(n, "in");
+            /* D1, D2, MODE e DEMO a riposo HIGH: il filo a GND è il fronte.
+             * Senza pull-up il banco GPIO1 legge 0 e il ponticello non si vede. */
+            if (n == s_lines[0] || n == s_lines[1] || n == s_lines[3] || n == s_lines[7]) {
+                rv1106_gpio1_pull_up(n);
+            }
         }
     }
 #else

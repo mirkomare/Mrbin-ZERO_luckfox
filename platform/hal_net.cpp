@@ -79,8 +79,12 @@ static bool iface_has_ip(const char *iface, uint32_t *out) {
 
 static void notify_got_ip(void) {
     s_has_ip = true;
-    if (s_ip_cb) s_ip_cb(s_ip_arg, IP_EVENT, IP_EVENT_STA_GOT_IP, nullptr);
-    core_status_led_notify_sta_connected();
+    /* Il callback della GUI accende i 3 lampeggi. Senza callback li accende qui. */
+    if (s_ip_cb) {
+        s_ip_cb(s_ip_arg, IP_EVENT, IP_EVENT_STA_GOT_IP, nullptr);
+    } else {
+        core_status_led_notify_sta_connected();
+    }
 }
 
 bool hal_net_sta_has_ip(void) { return s_has_ip; }
@@ -112,6 +116,11 @@ void hal_wifi_radio_down(void) {
 #ifndef _WIN32
 #ifdef __linux__
     (void)system("wpa_cli -i wlan0 terminate >/dev/null 2>&1 || true");
+    (void)system("killall hostapd >/dev/null 2>&1 || true");
+    if (access("/tmp/mrbin-dnsmasq.pid", F_OK) == 0) {
+        (void)system("kill $(cat /tmp/mrbin-dnsmasq.pid) >/dev/null 2>&1 || true");
+        (void)unlink("/tmp/mrbin-dnsmasq.pid");
+    }
     (void)system("ip link set wlan0 down >/dev/null 2>&1 || ifconfig wlan0 down >/dev/null 2>&1 || true");
 #endif
 #endif
@@ -204,7 +213,7 @@ bool hal_wifi_sta_apply(const char *ssid, const char *pass) {
     (void)system("wpa_cli -i wlan0 terminate >/dev/null 2>&1 || true");
     snprintf(cmd, sizeof(cmd), "wpa_supplicant -B -i wlan0 -c %s >/dev/null 2>&1 || true", conf);
     (void)system(cmd);
-    (void)system("udhcpc -i wlan0 -n -q -t 8 >/dev/null 2>&1 || true");
+    (void)system("udhcpc -i wlan0 -b -q -t 2 -T 2 >/dev/null 2>&1 || true");
     return true;
 #endif
 #endif
@@ -237,6 +246,66 @@ int hal_wifi_scan(char *out, size_t out_len) {
 #endif
     snprintf(out, out_len, "HOST_SIM");
     return 0;
+}
+
+static bool hal_wifi_start_ap(uint32_t core_id) {
+#ifndef _WIN32
+#ifdef __linux__
+    if (access("/sys/class/net/wlan0", F_OK) != 0) {
+        ESP_LOGE("hal_net", "AP: wlan0 assente");
+        return false;
+    }
+    (void)system("wpa_cli -i wlan0 terminate >/dev/null 2>&1 || true");
+    (void)system("killall hostapd >/dev/null 2>&1 || true");
+    char ssid[32];
+    snprintf(ssid, sizeof(ssid), "MrBin-%05lu", (unsigned long)core_id);
+    FILE *fp = fopen("/tmp/mrbin-hostapd.conf", "w");
+    if (!fp) {
+        return false;
+    }
+    fprintf(fp,
+            "interface=wlan0\n"
+            "driver=nl80211\n"
+            "ssid=%s\n"
+            "hw_mode=g\n"
+            "channel=6\n"
+            "wpa=2\n"
+            "wpa_passphrase=12345678\n"
+            "wpa_key_mgmt=WPA-PSK\n"
+            "rsn_pairwise=CCMP\n",
+            ssid);
+    fclose(fp);
+    (void)chmod("/tmp/mrbin-hostapd.conf", 0600);
+    (void)system("ip link set wlan0 up >/dev/null 2>&1 || ifconfig wlan0 up >/dev/null 2>&1 || true");
+    int rc = system("hostapd -B /tmp/mrbin-hostapd.conf >/tmp/mrbin-hostapd.log 2>&1");
+    if (rc != 0) {
+        ESP_LOGE("hal_net", "hostapd non partito (rc=%d)", rc);
+        return false;
+    }
+    (void)system("ip addr flush dev wlan0 >/dev/null 2>&1 || true");
+    (void)system("ip addr add 192.168.4.1/24 dev wlan0 >/dev/null 2>&1 || "
+                 "ifconfig wlan0 192.168.4.1 netmask 255.255.255.0 up >/dev/null 2>&1 || true");
+    fp = fopen("/tmp/mrbin-dnsmasq.conf", "w");
+    if (fp) {
+        fputs("interface=wlan0\n"
+              "bind-interfaces\n"
+              "port=0\n"
+              "dhcp-range=192.168.4.10,192.168.4.40,255.255.255.0,12h\n",
+              fp);
+        fclose(fp);
+        (void)system("dnsmasq -C /tmp/mrbin-dnsmasq.conf -x /tmp/mrbin-dnsmasq.pid "
+                     ">/tmp/mrbin-dnsmasq.log 2>&1 || true");
+    }
+    ESP_LOGI("hal_net", "AP %s su 192.168.4.1", ssid);
+    return true;
+#else
+    (void)core_id;
+    return false;
+#endif
+#else
+    (void)core_id;
+    return true;
+#endif
 }
 
 bool hal_net_bring_up(const char *ssid, const char *pass, uint32_t core_id, bool want_ap) {

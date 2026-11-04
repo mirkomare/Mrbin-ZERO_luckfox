@@ -16,7 +16,8 @@
 //
 //   LED esterno  → GPIO1_C3   linux  51  pin 21. Non resta un GPIO pulito né un pin
 //                              solo PWM. Il pinout stampa SPI0_MISO e PWM6; SPI0 è spento.
-//                              Il USER LED GPIO3_C6 (118) resta sulla scheda e non si usa.
+//                              Il USER LED GPIO3_C6 (118) è il gemello di scheda.
+//                              Nel DTS Luckfox è GPIO_ACTIVE_HIGH: pin alto = acceso.
 //   SQW          → GPIO1_C7   linux  55  pin 36, il pinout stampa solo PWM11
 //   MODE         → GPIO1_C5   linux  53  pin 32, UART4_TX (non I2C1). Resta: i GPIO
 //                              senza bus sul connettore sono già usati.
@@ -33,6 +34,7 @@
 #define CORE_GPIO_TPL_DONE        4
 #define CORE_GPIO_MODE_CFG        53
 #define CORE_GPIO_STATUS_LED      51
+#define CORE_GPIO_BOARD_LED       118
 #define CORE_GPIO_RTC_SQW         55
 #define CORE_GPIO_MODEM_PWR       73
 #define CORE_GPIO_DEMO            59
@@ -77,16 +79,23 @@ static_assert(CORE_GPIO_DEMO == 59, "PIN: DEMO = linux 59 (GPIO1_D3, non GPIO2_A
 
 #define CORE_MODEM_TEST_ON_MS     10000
 #define CORE_STATUS_LED_ON_LEVEL  1
+/* USER LED di scheda, GPIO3_C6: acceso con il pin a 1 (GPIO_ACTIVE_HIGH). */
+#define CORE_BOARD_LED_ON_LEVEL   1
 #define CORE_STATUS_LED_ERROR_BLINK_MS  100
-#define CORE_STATUS_LED_AP_BLINK_MS     2000
-#define CORE_STATUS_LED_STA_BLINK_MS    500
+#define CORE_STATUS_LED_AP_ON_MS        400
+#define CORE_STATUS_LED_AP_BLINK_MS     1600
+#define CORE_STATUS_LED_STA_BLINK_MS    1000
 #define CORE_STATUS_LED_STA_BLINK_COUNT 3
-#define CORE_STATUS_LED_STA_PULSE_MS    150
+#define CORE_STATUS_LED_STA_PULSE_MS    1000
+/* Un tentativo di associazione, poi 10 s, poi 5 s. Al terzo fallimento: AP. */
+#define CORE_WIFI_ATTEMPT_MS            8000
+#define CORE_WIFI_RETRY_GAP1_MS         10000
+#define CORE_WIFI_RETRY_GAP2_MS         5000
 #define CORE_STATUS_LED_D2_BLINK_COUNT  2
 #define CORE_STATUS_LED_D2_PULSE_MS     150
 #define CORE_STATUS_LED_D2_GAP_MS       200
-#define CORE_STATUS_LED_SAVING_ON_MS    100
-#define CORE_STATUS_LED_SAVING_OFF_MS   400
+#define CORE_STATUS_LED_SAVING_ON_MS    80
+#define CORE_STATUS_LED_SAVING_OFF_MS   80
 #define CORE_GPIO_STOP_POLL_PRIO        8
 #define CORE_STATUS_LED_TASK_PRIO       6
 #define CORE_STATUS_LED_TASK_STACK      3072
@@ -118,10 +127,27 @@ static_assert(CORE_GPIO_DEMO == 59, "PIN: DEMO = linux 59 (GPIO1_D3, non GPIO2_A
 #define CORE_VIDEO_PRESET_OK_FPS     30
 #define CORE_VIDEO_SENSOR_NATIVE_W   3840
 #define CORE_VIDEO_SENSOR_NATIVE_H   2160
+/* One pass on this Pico Zero ISP. Wider than this and the ISP drops
+ * the MIPI frame, so 3840x2160 opens VENC and then never returns a
+ * picture (GUI: Capture failed, no frame). */
+#define CORE_VIDEO_ISP_PASS_W        3072
+#define CORE_VIDEO_ISP_PASS_H        1728
 
 /* 2300 is not the sensor mode: only a size that lands on the native edge
  * is lifted (2300 → 2304). 1080 stays 1080 — FullHD is a preset, and the
  * capture path aligns the stride without changing the picture size. */
+/* 3840x2160 (and anything past the one-pass ISP) becomes 3072x1728,
+ * which is the frame the ISP actually delivers. */
+static inline void core_video_clamp_isp_pass(uint16_t *w, uint16_t *h) {
+    if (!w || !h) {
+        return;
+    }
+    if (*w > (uint16_t)CORE_VIDEO_ISP_PASS_W || *h > (uint16_t)CORE_VIDEO_ISP_PASS_H) {
+        *w = (uint16_t)CORE_VIDEO_ISP_PASS_W;
+        *h = (uint16_t)CORE_VIDEO_ISP_PASS_H;
+    }
+}
+
 static inline uint16_t core_video_align16(uint16_t v, uint16_t native) {
     if (v >= native) {
         return v;
@@ -147,7 +173,7 @@ static inline uint8_t core_video_fps_ceiling(uint16_t w, uint16_t h) {
 #define CORE_VIDEO_FPS              CORE_VIDEO_FPS_DEFAULT
 #define CORE_VIDEO_BITRATE_DEFAULT  7000000
 #define CORE_VIDEO_BITRATE_MIN      2000000
-#define CORE_VIDEO_BITRATE_MAX      28000000
+#define CORE_VIDEO_BITRATE_MAX      32000000
 #define CORE_VIDEO_BITRATE_1080_MIN 12000000
 #define CORE_VIDEO_BITRATE          CORE_VIDEO_BITRATE_DEFAULT
 #define CORE_VIDEO_GOP_DEFAULT      24
@@ -318,7 +344,9 @@ static inline uint8_t core_video_fps_ceiling(uint16_t w, uint16_t h) {
 #define CORE_REC_SD_BURST_FRAMES_PIR_ENC 32
 #define CORE_REC_SD_BURST_FRAMES_PIR_ENC_URGENT 48
 #define CORE_REC_SD_BURST_STOP        64
-#define CORE_REC_SD_FRAME_COPY_MAX    (1024U * 1024U)
+/* 8MP IDR is often past 1 MB (seen 1.3 MB at 2880x1620). A 1 MB cap
+ * discarded the only keyframe, so the MP4 was never created. */
+#define CORE_REC_SD_FRAME_COPY_MAX    (4U * 1024U * 1024U)
 /* Web Stop: pull frames already in VENC, then halt. The pipeline keeps
  * producing until DisableChn, so a multi-second budget was a hard wait. */
 #define CORE_REC_STOP_CAPTURE_DRAIN_MS     120

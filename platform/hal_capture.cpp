@@ -145,6 +145,11 @@ static volatile int s_sub_h;
 static volatile int s_sub_fps;
 /* Mainpath left enabled so DEMO luma (ch1) is not stream-off'd on clip end. */
 static volatile int s_main_left_up;
+static volatile int s_main_left_w;
+static volatile int s_main_left_h;
+/* Defined with the stop-watch below. A size change may DisableChn from start. */
+static volatile int s_mpi_stop_active;
+static void rkmpi_arm_stop_watch(void);
 static volatile int s_3a_up;
 static volatile unsigned s_mpi_job_gen;
 static pthread_mutex_t s_mpi_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -215,26 +220,33 @@ static void rkmpi_venc_mirror(VENC_CHN_ATTR_S *ea, int online) {
     ESP_LOGI("hal_cap", "VENC senza mirror (orientamento sul sensore)");
 }
 
-/* MPP default lets QP reach 51. On motion that becomes large moving blocks
- * until the next IDR. Cap it after CreateChn, before StartRecvFrame. */
+/* MPP default lets QP reach 51. On motion the decoder copies whole
+ * macroblocks and the picture looks like a sliding puzzle until the next
+ * IDR. SetRcParam before StartRecvFrame is ignored, so call this after. */
 static void rkmpi_h264_limit_qp(VENC_CHN ch, int big) {
     VENC_RC_PARAM_S p;
     memset(&p, 0, sizeof(p));
     (void)RK_MPI_VENC_GetRcParam(ch, &p);
-    const RK_U32 mn = big ? 22U : 18U;
-    const RK_U32 mx = big ? 34U : 32U;
-    p.s32FirstFrameStartQp = mn + 4U;
-    p.stParamH264.u32StepQp = 2;
+    /* Max QP 26/22: above that, motion compensation copies whole tiles
+     * and the picture looks like a puzzle until the next I-frame. */
+    /* 8 MP at QP max 26 plus a re-encode never finished a frame
+     * inside 66 ms (the file sat at ~1 fps). 36 is the project cap
+     * and still stays clear of the QP 51 tile-copy look. */
+    const RK_U32 mn = big ? 18U : 14U;
+    const RK_U32 mx = big ? 36U : 22U;
+    const RK_U32 imx = big ? 32U : 20U;
+    p.s32FirstFrameStartQp = mn + 2U;
+    p.stParamH264.u32StepQp = 1;
     p.stParamH264.u32MinQp = mn;
     p.stParamH264.u32MaxQp = mx;
     p.stParamH264.u32MinIQp = mn;
-    p.stParamH264.u32MaxIQp = mx;
+    p.stParamH264.u32MaxIQp = imx;
     p.stParamH264.u32FrmMinQp = mn + 1U;
     p.stParamH264.u32FrmMaxQp = mx;
     p.stParamH264.u32FrmMinIQp = mn + 1U;
-    p.stParamH264.u32FrmMaxIQp = mx;
-    p.stParamH264.s32DeltIpQp = 2;
-    p.stParamH264.s32MaxReEncodeTimes = 1;
+    p.stParamH264.u32FrmMaxIQp = imx;
+    p.stParamH264.s32DeltIpQp = 0;
+    p.stParamH264.s32MaxReEncodeTimes = big ? 0 : 1;
     const int ret = RK_MPI_VENC_SetRcParam(ch, &p);
     if (ret != RK_SUCCESS) {
         ESP_LOGW("hal_cap", "VENC ch%d limite QP fallito ret=0x%x", (int)ch, (unsigned)ret);
@@ -258,6 +270,10 @@ static int rkmpi_3k_wrap_line(int vir_h) {
 static int rkmpi_vi_venc_start(cap_t *c) {
     int w = c->w ? c->w : CORE_VIDEO_WIDTH_DEFAULT;
     int h = c->h ? c->h : CORE_VIDEO_HEIGHT_DEFAULT;
+    if (w > CORE_VIDEO_ISP_PASS_W || h > CORE_VIDEO_ISP_PASS_H) {
+        w = CORE_VIDEO_ISP_PASS_W;
+        h = CORE_VIDEO_ISP_PASS_H;
+    }
     w = core_video_align16((uint16_t)w, CORE_VIDEO_WIDTH_MAX);
     h = core_video_align16((uint16_t)h, CORE_VIDEO_HEIGHT_MAX);
     int keep_fps = c->keep_fps ? c->keep_fps : (c->fps ? (int)c->fps : CORE_VIDEO_FPS_DEFAULT);
@@ -317,9 +333,8 @@ static int rkmpi_vi_venc_start(cap_t *c) {
 
     VI_CHN_ATTR_S va;
     memset(&va, 0, sizeof(va));
-    /* 24MB CMA. NV12 1080p ~3.1 MB/buf (2 bufs). 2304×1296 is ~4.48 MB and
-     * 3840×2160 is ~12.4 MB: two full planes plus VENC return ENOMEM.
-     * Above 1080p keep one VI buffer. Online wrap does not deliver frames. */
+    /* One VI buffer above 1080p. Two 8 MP planes make EnableChn
+     * fail on this board even with the 100 MB heap. */
     const int above_1080 = rkmpi_above_1080p(w, h);
     /* Online wrap never finishes a picture on this IMX415: rkvenc times out
      * with vepu_cycle 0 and RTSP stays empty. One full VI buffer encodes. */
@@ -331,8 +346,19 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     va.stIspOpt.bNoUseLibV4L2 = RK_TRUE;
     strncpy(va.stIspOpt.aEntityName, CORE_VIDEO_RKISP_ENTITY,
             sizeof(va.stIspOpt.aEntityName) - 1);
-    va.stIspOpt.stMaxSize.u32Width = CORE_VIDEO_SENSOR_NATIVE_W;
-    va.stIspOpt.stMaxSize.u32Height = CORE_VIDEO_SENSOR_NATIVE_H;
+    /* Full-frame max size forces the IMX415 into 3864×2192. The ISP
+     * then read the whole 8 MP frame back twice and every preset,
+     * including 1080p, stayed around 4–5 fps. 1080p and below ask
+     * only for their own size, so the sensor takes the 1944×1097
+     * binning mode at 30 fps. Larger presets still open the native
+     * frame. */
+    if (w <= 1920 && h <= 1088) {
+        va.stIspOpt.stMaxSize.u32Width = (RK_U32)c->vir_w;
+        va.stIspOpt.stMaxSize.u32Height = (RK_U32)c->vir_h;
+    } else {
+        va.stIspOpt.stMaxSize.u32Width = CORE_VIDEO_SENSOR_NATIVE_W;
+        va.stIspOpt.stMaxSize.u32Height = CORE_VIDEO_SENSOR_NATIVE_H;
+    }
     /* VI buffer stride must match VENC u32Vir* or MPP drops every frame
      * (dmesg: frame [1920,1080,1920,1080] vs prep [1920,1080,1920,1088]). */
     va.stSize.u32Width = (RK_U32)c->vir_w;
@@ -343,8 +369,35 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     va.enCompressMode = COMPRESS_MODE_NONE;
     va.u32Depth = 0;
     const int rec_3a = rkmpi_rec_wants_3a(c);
-    ret = RK_MPI_VI_SetChnAttr(0, c->chn, &va);
-    if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VI_SetChnAttr rkisp_mainpath", ret);
+    /* SetChnAttr on a mainpath left enabled at another size stalls the ISP
+     * and the GUI dies. DisableChn while selfpath/bypass is streaming does
+     * not return, so refuse that case instead of hanging. */
+    if (s_main_left_up &&
+        (s_main_left_w != (int)c->vir_w || s_main_left_h != (int)c->vir_h)) {
+        if (s_prev_up || s_sub_up || s_live_up) {
+            ESP_LOGE("hal_cap",
+                     "VI mainpath %dx%d ancora acceso, nuova %dx%d con un altro canale",
+                     s_main_left_w, s_main_left_h, c->vir_w, c->vir_h);
+            rkmpi_fail("VI mainpath busy", -1);
+            return -1;
+        }
+        ESP_LOGI("hal_cap", "VI mainpath %dx%d -> %dx%d",
+                 s_main_left_w, s_main_left_h, c->vir_w, c->vir_h);
+        rkmpi_arm_stop_watch();
+        (void)RK_MPI_VI_DisableChn(0, c->chn);
+        s_mpi_stop_active = 0;
+        s_main_left_up = 0;
+        s_main_left_w = 0;
+        s_main_left_h = 0;
+    }
+    if (s_main_left_up) {
+        ESP_LOGI("hal_cap", "VI mainpath già %dx%d — salto SetChnAttr",
+                 s_main_left_w, s_main_left_h);
+        ret = RK_SUCCESS;
+    } else {
+        ret = RK_MPI_VI_SetChnAttr(0, c->chn, &va);
+        if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VI_SetChnAttr rkisp_mainpath", ret);
+    }
     /* Wrap before EnableChn: the encoder ring is wrap_line rows, not a full
      * NV12 plane. Picture size stays pic/vir (same stride as VENC). */
     if (h264_wrap) {
@@ -461,8 +514,8 @@ static int rkmpi_vi_venc_start(cap_t *c) {
         /* A full NV12 plane above 1080p is the alloc
          * mpp_vcodec_chan_setup_hal_bufs rejected. Bitstream only. */
         RK_U32 stream = (RK_U32)w * (RK_U32)h / 2U;
-        if (stream > (2560U * 1024U)) {
-            stream = 2560U * 1024U;
+        if (stream > (3072U * 1024U)) {
+            stream = 3072U * 1024U;
         }
         if (stream < (512U * 1024U)) {
             stream = 512U * 1024U;
@@ -481,9 +534,6 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     }
     ret = RK_MPI_VENC_CreateChn(0, &ea);
     if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VENC_CreateChn", ret);
-    if (!c->mjpeg) {
-        rkmpi_h264_limit_qp(0, above_1080);
-    }
     if (h264_wrap) {
         if (wrap_line > 0) {
             VENC_CHN_BUF_WRAP_S vw;
@@ -523,6 +573,9 @@ static int rkmpi_vi_venc_start(cap_t *c) {
     rp.s32RecvPicNum = -1;
     ret = RK_MPI_VENC_StartRecvFrame(0, &rp);
     if (ret != RK_SUCCESS) return rkmpi_fail_release(c, "RK_MPI_VENC_StartRecvFrame", ret);
+    if (!c->mjpeg) {
+        rkmpi_h264_limit_qp(0, above_1080);
+    }
 
     MPP_CHN_S src, dst;
     memset(&src, 0, sizeof(src));
@@ -553,7 +606,6 @@ static int rkmpi_vi_venc_start(cap_t *c) {
  * stream-off event. If that join never returns, Live and Registra
  * stay wedged until the process is replaced. 8 s is far past a healthy
  * stream-off (~0.5 s). Exit so mrbin-core-watch can restore the camera. */
-static volatile int s_mpi_stop_active;
 
 static void *rkmpi_stop_watch(void *) {
     for (int i = 0; i < 80; ++i) {
@@ -638,7 +690,7 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
     rkmpi_venc_mirror(&ea, wrap_line > 0);
     if (above_1080) {
         RK_U32 stream = (RK_U32)w * (RK_U32)h / 2U;
-        if (stream > (2560U * 1024U)) stream = 2560U * 1024U;
+        if (stream > (3072U * 1024U)) stream = 3072U * 1024U;
         if (stream < (512U * 1024U)) stream = 512U * 1024U;
         ea.stVencAttr.u32BufSize = stream;
         ea.stGopAttr.u32MaxLtrCount = 0;
@@ -652,7 +704,6 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
         rkmpi_vi_venc_stop(c);
         return -1;
     }
-    rkmpi_h264_limit_qp(0, above_1080);
     if (wrap_line > 0) {
         VENC_CHN_BUF_WRAP_S vw;
         memset(&vw, 0, sizeof(vw));
@@ -681,6 +732,7 @@ static int rkmpi_venc_swap_h264(cap_t *c, int w, int h, int keep_fps, uint32_t b
         rkmpi_vi_venc_stop(c);
         return -1;
     }
+    rkmpi_h264_limit_qp(0, above_1080);
     ret = RK_MPI_SYS_Bind(&src, &dst);
     if (ret != RK_SUCCESS) {
         pthread_mutex_unlock(&s_mpi_mu);
@@ -726,10 +778,15 @@ static void rkmpi_vi_venc_stop(cap_t *c) {
      * does not return. The 8 s stop-watch then _exit's and the GUI dies. */
     if (s_prev_up || s_sub_up || s_live_up) {
         s_main_left_up = 1;
-        ESP_LOGI("hal_cap", "VENC chiuso, VI mainpath lasciato su");
+        s_main_left_w = (int)c->vir_w;
+        s_main_left_h = (int)c->vir_h;
+        ESP_LOGI("hal_cap", "VENC chiuso, VI mainpath lasciato su %dx%d",
+                 s_main_left_w, s_main_left_h);
     } else {
         (void)RK_MPI_VI_DisableChn(0, c->chn);
         s_main_left_up = 0;
+        s_main_left_w = 0;
+        s_main_left_h = 0;
     }
     /* Preview, channel 2 and the local bypass share the VI device and SYS. */
     if (!s_prev_up && !s_sub_up && !s_live_up) {
@@ -1391,7 +1448,12 @@ int hal_sub_start(int w, int h, int fps, uint32_t bitrate) {
     }
     ea.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
     ea.stRcAttr.stH264Cbr.u32BitRate = kbps;
-    ea.stRcAttr.stH264Cbr.u32Gop = (RK_U32)fps;
+    /* Short GOP so a coarse motion vector clears in about half a second. */
+    RK_U32 sub_gop = (RK_U32)fps / 2U;
+    if (sub_gop < 4U) {
+        sub_gop = 4U;
+    }
+    ea.stRcAttr.stH264Cbr.u32Gop = sub_gop;
     ea.stRcAttr.stH264Cbr.u32SrcFrameRateNum = (RK_U32)fps;
     ea.stRcAttr.stH264Cbr.u32SrcFrameRateDen = 1;
     ea.stRcAttr.stH264Cbr.fr32DstFrameRateNum = (RK_U32)fps;
@@ -1404,14 +1466,11 @@ int hal_sub_start(int w, int h, int fps, uint32_t bitrate) {
     ea.stVencAttr.u32VirHeight = (RK_U32)h;
     ea.stVencAttr.u32StreamBufCnt = 2;
     ea.stVencAttr.u32BufSize = (RK_U32)w * (RK_U32)h;
-    if (ea.stVencAttr.u32BufSize > (2560U * 1024U)) {
-        ea.stVencAttr.u32BufSize = 2560U * 1024U;
+    if (ea.stVencAttr.u32BufSize > (3072U * 1024U)) {
+        ea.stVencAttr.u32BufSize = 3072U * 1024U;
     }
     ea.stVencAttr.enMirror = MIRROR_NONE;
     ret = RK_MPI_VENC_CreateChn(2, &ea);
-    if (ret == RK_SUCCESS) {
-        rkmpi_h264_limit_qp(2, above);
-    }
     if (ret != RK_SUCCESS) {
         (void)RK_MPI_VI_DisableChn(0, 1);
         pthread_mutex_unlock(&s_mpi_mu);
@@ -1429,6 +1488,7 @@ int hal_sub_start(int w, int h, int fps, uint32_t bitrate) {
         ESP_LOGE("hal_cap", "Canale 2 StartRecv ret=0x%x", (unsigned)ret);
         return -1;
     }
+    rkmpi_h264_limit_qp(2, above);
     MPP_CHN_S src, dst;
     memset(&src, 0, sizeof(src));
     memset(&dst, 0, sizeof(dst));

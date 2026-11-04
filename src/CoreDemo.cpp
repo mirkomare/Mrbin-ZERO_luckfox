@@ -21,6 +21,7 @@
 
 static const char *TAG = "core_demo";
 static volatile bool s_demo = false;
+static bool s_demo_decided = false;
 static volatile bool s_rtsp_view = false;
 static core_settings_t s_rtsp_cfg;
 static volatile int s_rtsp_goal = -1;
@@ -41,58 +42,69 @@ bool core_gpio_is_demo_jumper(void) {
     return gpio_get_level((gpio_num_t)CORE_GPIO_DEMO) == 0;
 }
 
-static void demo_try_latch(const char *when) {
-    if (s_demo) {
+static void demo_try_latch(const char *when, const core_settings_t *settings) {
+    if (s_demo || s_demo_decided) {
         return;
     }
+    s_demo_decided = true;
     const int lvl = gpio_get_level((gpio_num_t)CORE_GPIO_DEMO);
-    if (core_gpio_is_demo_jumper()) {
+    if (settings && settings->demo_enable) {
         s_demo = true;
-        ESP_LOGW(TAG, "DEMO attiva %s (GPIO%d LOW + MODE CONFIG) — no spegnimento TPL",
-                 when, (int)CORE_GPIO_DEMO);
+        ESP_LOGW(TAG, "DEMO attiva %s (flag Impostazioni, GPIO%d=%d) — no spegnimento TPL",
+                 when, (int)CORE_GPIO_DEMO, lvl);
     } else {
-        ESP_LOGI(TAG, "DEMO non attiva %s — GPIO%d=%d (pin 24 → GND, es. pin 23, al boot)",
+        ESP_LOGI(TAG, "DEMO disattivata (impostazioni) %s — GPIO%d=%d ignorato",
                  when, (int)CORE_GPIO_DEMO, lvl);
     }
 }
 
-void core_demo_latch_from_boot(bool mode_config) {
-    if (!mode_config) {
-        return;
-    }
-    demo_try_latch("al boot");
+void core_demo_latch_from_boot(const core_settings_t *settings) {
+    demo_try_latch("al boot", settings);
 }
 
 bool core_demo_is_active(void) {
     return s_demo;
 }
 
-const char *core_demo_html_banner(void) {
-    static char html[3072];
-    if (!s_demo) {
+const char *core_demo_html_banner(int rtsp_on) {
+    static char html[4096];
+    const int on = rtsp_on ? 1 : 0;
+    const int streaming = (on && core_rtsp_pipe_up()) ? 1 : 0;
+    const char *label = !on ? "Attiva RTSP" : (streaming ? "Spegni RTSP" : "RTSP fermo");
+    const char *idle = streaming ? "" : " demo-rtsp-idle";
+    const char *badge = s_demo
+                            ? "<div class=\"demo-badge\" title=\"Modalita demo banco\">DEMO</div>"
+                            : "";
+    const char *top = s_demo ? "46px" : "10px";
+    const int n = snprintf(
+        html, sizeof(html),
+        "<style>.demo-badge,.demo-rtsp{position:fixed;right:10px;z-index:2000;width:auto;"
+        "background:#e65100;color:#fff;font-weight:700;padding:6px 14px;border-radius:6px;"
+        "font-size:14px;letter-spacing:.06em;line-height:1.2;white-space:nowrap;"
+        "box-shadow:0 2px 10px rgba(0,0,0,.25);font-family:sans-serif}"
+        ".demo-rtsp-idle{background:#546e7a}"
+        ".demo-badge{top:10px}.demo-rtsp{top:%s;border:0;margin:0;cursor:pointer;"
+        "display:inline-block;left:auto}"
+        "</style>"
+        "%s"
+        "<button type=\"button\" id=\"demoRtspBtn\" class=\"demo-rtsp%s\" data-on=\"%d\">%s</button>"
+        "<script>(function(){var b=document.getElementById('demoRtspBtn');if(!b)return;"
+        "function paint(j){var live=!!(j.on&&j.streaming);b.setAttribute('data-on',j.on?'1':'0');"
+        "b.className='demo-rtsp'+(live?'':' demo-rtsp-idle');"
+        "b.textContent=j.on?(live?'Spegni RTSP':'RTSP fermo'):'Attiva RTSP';"
+        "if(j.url)b.title=j.on&&!live?'Encoder fermo':j.url;}"
+        "b.onclick=function(){var next=b.getAttribute('data-on')==='1'?'0':'1';var old=b.textContent;"
+        "b.disabled=true;b.textContent=next==='1'?'Apro RTSP...':'Chiudo RTSP...';"
+        "fetch('/demo/rtsp',{method:'POST',credentials:'same-origin',"
+        "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'on='+next})"
+        ".then(function(r){return r.json();}).then(function(j){b.disabled=false;if(!j||!j.ok){b.textContent=old;return;}"
+        "paint(j);"
+        "if(location.pathname==='/live'||location.pathname==='/channels')location.reload();})"
+        ".catch(function(){b.disabled=false;b.textContent=old;});};})();</script>",
+        top, badge, idle, on, label);
+    if (n < 0 || n >= (int)sizeof(html)) {
         html[0] = 0;
-        return html;
     }
-    snprintf(html, sizeof(html),
-             "<style>.demo-badge,.demo-rtsp{position:fixed;right:10px;z-index:2000;width:auto;"
-             "background:#e65100;color:#fff;font-weight:700;padding:6px 14px;border-radius:6px;"
-             "font-size:14px;letter-spacing:.06em;line-height:1.2;white-space:nowrap;"
-             "box-shadow:0 2px 10px rgba(0,0,0,.25);font-family:sans-serif}"
-             ".demo-badge{top:10px}.demo-rtsp{top:46px;border:0;margin:0;cursor:pointer;"
-             "display:inline-block;left:auto}"
-             "</style>"
-             "<div class=\"demo-badge\" title=\"Modalità demo banco\">DEMO</div>"
-             "<button type=\"button\" id=\"demoRtspBtn\" class=\"demo-rtsp\" data-on=\"%d\">%s</button>"
-             "<script>(function(){var b=document.getElementById('demoRtspBtn');if(!b)return;"
-             "b.onclick=function(){var next=b.getAttribute('data-on')==='1'?'0':'1';var old=b.textContent;"
-             "b.disabled=true;b.textContent=next==='1'?'Apro RTSP...':'Chiudo RTSP...';"
-             "fetch('/demo/rtsp',{method:'POST',credentials:'same-origin',"
-             "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'on='+next})"
-             ".then(function(r){return r.json();}).then(function(j){b.disabled=false;if(!j||!j.ok){b.textContent=old;return;}"
-             "b.setAttribute('data-on',j.on?'1':'0');b.textContent=j.on?'Spegni RTSP':'Attiva RTSP';"
-             "if(j.url)b.title=j.url;if(location.pathname==='/live')location.reload();})"
-             ".catch(function(){b.disabled=false;b.textContent=old;});};})();</script>",
-             s_rtsp_view ? 1 : 0, s_rtsp_view ? "Spegni RTSP" : "Attiva RTSP");
     return html;
 }
 
@@ -289,6 +301,12 @@ static void demo_motion_task(void *arg) {
     uint8_t motion_miss_streak = 0;
     bool was_recording = false;
     bool rec_had_video_this_clip = false;
+    /* Il pull-down di fabbrica teneva D2 sempre a 0: un LOW non era un evento.
+     * Dopo il pull-up, il riposo è HIGH. Si arma al primo HIGH e da lì un LOW
+     * stabile chiude la clip e non ne fa partire un'altra finché resta basso. */
+    bool d2_armed = false;
+    int64_t d2_low_since_us = 0;
+    int64_t d2_block_log_us = 0;
     int64_t last_score_log_us = 0;
     int64_t last_idle_log_us = 0;
     uint8_t luma_fail_streak = 0;
@@ -299,6 +317,30 @@ static void demo_motion_task(void *arg) {
              CORE_DEMO_MOTION_STILL_THRESHOLD, (unsigned)CORE_DEMO_NO_MOTION_STOP_MS);
 
     while (s_demo) {
+        /* Anche con la pagina live o RTSP aperti: quel ramo fa continue
+         * prima del controllo in fondo, e D2 non chiudeva la clip. */
+        {
+            const int64_t tick_us = esp_timer_get_time();
+            const int d2_now = gpio_get_level((gpio_num_t)CORE_GPIO_D2_END);
+            if (d2_now != 0) {
+                if (!d2_armed) {
+                    d2_armed = true;
+                    ESP_LOGI(TAG, "D2 GPIO%d a riposo HIGH — STOP su LOW (pin fisico 26)",
+                             (int)CORE_GPIO_D2_END);
+                }
+                d2_low_since_us = 0;
+            } else if (d2_armed) {
+                if (d2_low_since_us == 0) {
+                    d2_low_since_us = tick_us;
+                } else if ((tick_us - d2_low_since_us) >=
+                               ((int64_t)CORE_REC_STOP_DEBOUNCE_MS * 1000) &&
+                           core_recorder_manual_is_active()) {
+                    ESP_LOGI(TAG, "D2 GPIO%d LOW — stop registrazione in corso",
+                             (int)CORE_GPIO_D2_END);
+                    core_recorder_manual_stop();
+                }
+            }
+        }
         demo_rtsp_goal_apply(&luma_up, &prev, &prev_w, &prev_h, &prev_stride);
         if (s_rtsp_view) {
             if (core_recorder_manual_is_active()) {
@@ -316,11 +358,18 @@ static void demo_motion_task(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-        if (core_live_is_running() && !hal_live_running()) {
-            if (luma_up) {
+        /* Live page (bypass MJPEG or the old selfpath) must not open a clip.
+         * Entering /live changes the picture; that used to look like motion
+         * and started a new file on every visit. */
+        if (core_live_is_running() || hal_live_running()) {
+            motion_streak = 0;
+            motion_miss_streak = 0;
+            if (prev) {
                 free(prev);
                 prev = nullptr;
                 prev_w = prev_h = prev_stride = 0;
+            }
+            if (!hal_live_running() && luma_up) {
                 luma_up = false;
                 ESP_LOGI(TAG, "DEMO: luma in pausa, il live usa il selfpath");
             }
@@ -439,7 +488,12 @@ static void demo_motion_task(void *arg) {
                 ESP_LOGI(TAG, "Clip terminata — cooldown movimento %u ms",
                          (unsigned)CORE_DEMO_CLIP_COOLDOWN_MS);
             } else {
-                ESP_LOGW(TAG, "Registrazione demo senza frame MP4 — niente cooldown (riprova subito)");
+                /* A clip with no MP4 must not mint a new seq on the next loop.
+                 * D2 already low was doing that every ~150 ms. */
+                s_clip_cooldown_until_us =
+                    esp_timer_get_time() + ((int64_t)CORE_DEMO_CLIP_COOLDOWN_MS * 1000LL);
+                ESP_LOGW(TAG, "Registrazione demo senza frame MP4 — pausa %u ms",
+                         (unsigned)CORE_DEMO_CLIP_COOLDOWN_MS);
             }
             rec_had_video_this_clip = false;
         }
@@ -456,8 +510,29 @@ static void demo_motion_task(void *arg) {
                      score, (long long)quiet_ms, (long long)(clip_ms / 1000));
         }
 
+        const int d2_level = gpio_get_level((gpio_num_t)CORE_GPIO_D2_END);
+        if (d2_level != 0) {
+            if (!d2_armed) {
+                d2_armed = true;
+                ESP_LOGI(TAG, "D2 GPIO%d a riposo HIGH — STOP su LOW (pin fisico 26)",
+                         (int)CORE_GPIO_D2_END);
+            }
+            d2_low_since_us = 0;
+        } else if (d2_low_since_us == 0) {
+            d2_low_since_us = now_us;
+        }
+        const bool d2_held =
+            d2_armed && d2_level == 0 &&
+            (now_us - d2_low_since_us) >= ((int64_t)CORE_REC_STOP_DEBOUNCE_MS * 1000);
+
         const bool cooldown_ok = now_us >= s_clip_cooldown_until_us;
-        if (motion_streak == CORE_DEMO_MOTION_START_FRAMES && !rec_active && cooldown_ok) {
+        if (motion_streak == CORE_DEMO_MOTION_START_FRAMES && !rec_active && cooldown_ok &&
+            d2_held) {
+            if (now_us - d2_block_log_us >= 3000000LL) {
+                d2_block_log_us = now_us;
+                ESP_LOGI(TAG, "D2 GPIO%d LOW — clip non avviata", (int)CORE_GPIO_D2_END);
+            }
+        } else if (motion_streak == CORE_DEMO_MOTION_START_FRAMES && !rec_active && cooldown_ok) {
             ESP_LOGI(TAG, "Movimento score=%d — encoder H264 dedicato (cifratura=%d)",
                      score, settings.rec_encrypt ? 1 : 0);
             if (core_recorder_manual_start(&settings)) {
@@ -478,7 +553,7 @@ static void demo_motion_task(void *arg) {
                          (long long)((s_clip_cooldown_until_us - now_us) / 1000LL));
             }
         } else if (rec_active) {
-            const bool d2_stop = gpio_get_level((gpio_num_t)CORE_GPIO_D2_END) == 0;
+            const bool d2_stop = d2_held;
             const int64_t quiet_ms =
                 quiet_since_us > 0 ? (now_us - quiet_since_us) / 1000LL : 0;
             const int64_t t0_us = clip_start_us > 0 ? clip_start_us : demo_rec_arm_us;
@@ -532,9 +607,7 @@ void core_demo_config_start(const core_settings_t *settings) {
     if (!settings) {
         return;
     }
-    if (core_gpio_is_mode_config()) {
-        demo_try_latch("in CONFIG");
-    }
+    demo_try_latch("in CONFIG", settings);
     if (!s_demo) {
         return;
     }
@@ -549,8 +622,12 @@ void core_demo_config_start(const core_settings_t *settings) {
     if (s_demo_task) {
         return;
     }
-    core_status_led_set_mode(CORE_LED_OFF);
-    ESP_LOGI(TAG, "LED DEMO: spento in attesa movimento (acceso fisso solo in registrazione)");
+    /* AP resta in lampeggio lento. I 3 lampeggi dell'IP non vanno interrotti. */
+    const core_status_led_mode_t led = core_status_led_current();
+    if (led != CORE_LED_AP && led != CORE_LED_STA_CONNECTED) {
+        core_status_led_set_mode(CORE_LED_OFF);
+        ESP_LOGI(TAG, "LED DEMO: spento in attesa movimento (acceso fisso solo in registrazione)");
+    }
     core_settings_t *copy = (core_settings_t *)malloc(sizeof(core_settings_t));
     if (!copy) {
         return;

@@ -1416,7 +1416,13 @@ static void rec_apply_selected_encode_size(uint16_t *w, uint16_t *h, uint8_t *fp
         if (*h > CORE_VIDEO_HEIGHT_MAX) {
             *h = (uint16_t)CORE_VIDEO_HEIGHT_MAX;
         }
-        /* Sopra ~5 MP l'encode della Pico Zero è 8M@15, non 30. */
+        if (*w > (uint16_t)CORE_VIDEO_ISP_PASS_W || *h > (uint16_t)CORE_VIDEO_ISP_PASS_H) {
+            ESP_LOGW(TAG, "IMX415 %ux%u oltre l'ISP → %ux%u",
+                     (unsigned)*w, (unsigned)*h,
+                     (unsigned)CORE_VIDEO_ISP_PASS_W, (unsigned)CORE_VIDEO_ISP_PASS_H);
+            core_video_clamp_isp_pass(w, h);
+        }
+        /* Sopra ~5 MP l'encode della Pico Zero è 15 fps, non 30. */
         if (fps && *fps > core_video_fps_ceiling(*w, *h)) {
             *fps = core_video_fps_ceiling(*w, *h);
         }
@@ -2712,29 +2718,33 @@ static bool rec_sd_write_head_frame(rec_dual_job_ctx_t *ctx) {
     }
 
     // Plain e cifrato: copia sotto mutex, mux fuori mutex (evita race pool_compact vs puntatore ring).
-    if (size > CORE_REC_SD_FRAME_COPY_MAX) {
-        core_h264_buffer_pop_head(ctx->ring);
+    // Un IDR 8MP non sta in una seconda copia: si scrive dal ring, mutex tenuto.
+    const bool copy_ok = (size <= CORE_REC_SD_FRAME_COPY_MAX) && rec_sd_ensure_frame_copy(ctx, size);
+    const uint8_t *nal = core_h264_frame_data(ctx->ring, f);
+    if (copy_ok) {
+        memcpy(ctx->sd_frame_copy, nal, size);
+        nal = ctx->sd_frame_copy;
         xSemaphoreGive(ctx->ring_mtx);
-        ESP_LOGW(TAG, "Frame SD troppo grande (%lu B, max %u) — scartato",
-                 (unsigned long)size, (unsigned)CORE_REC_SD_FRAME_COPY_MAX);
-        ctx->dropped_frames++;
-        return true;
+    }
+    if (!copy_ok) {
+        static int64_t s_direct_log_us;
+        int64_t now = esp_timer_get_time();
+        if (now - s_direct_log_us >= 2000000) {
+            s_direct_log_us = now;
+            ESP_LOGW(TAG, "Copia frame SD non disponibile (%lu B) — scrittura diretta",
+                     (unsigned long)size);
+        }
     }
 
-    if (!rec_sd_ensure_frame_copy(ctx, size)) {
-        xSemaphoreGive(ctx->ring_mtx);
-        ESP_LOGW(TAG, "Copia frame SD fallita (%lu B)", (unsigned long)size);
-        return false;
-    }
-    memcpy(ctx->sd_frame_copy, core_h264_frame_data(ctx->ring, f), size);
-    xSemaphoreGive(ctx->ring_mtx);
-
-    if (!recorder_muxer_write_packet(ctx->muxer, ctx->sd_frame_copy, size, pts, nullptr)) {
+    if (!recorder_muxer_write_packet(ctx->muxer, nal, size, pts, nullptr)) {
+        if (!copy_ok) {
+            xSemaphoreGive(ctx->ring_mtx);
+        }
         ctx->sd_write_fails++;
         return false;
     }
     if (ctx->h264_fp) {
-        if (fwrite(ctx->sd_frame_copy, 1, size, ctx->h264_fp) != size) {
+        if (fwrite(nal, 1, size, ctx->h264_fp) != size) {
             ESP_LOGW(TAG, "Scrittura .h264 fallita (%lu B)", (unsigned long)size);
         } else {
             if (ctx->h264_frames == 0) {
@@ -2745,7 +2755,9 @@ static bool rec_sd_write_head_frame(rec_dual_job_ctx_t *ctx) {
         }
     }
 
-    xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    if (copy_ok) {
+        xSemaphoreTake(ctx->ring_mtx, portMAX_DELAY);
+    }
     if (ctx->ring->head && ctx->ring->head->pts_ms == raw_pts) {
         core_h264_buffer_pop_head(ctx->ring);
         ctx->muxer_frames++;
@@ -3733,7 +3745,20 @@ typedef struct {
 } manual_rec_arg_t;
 
 static bool manual_should_stop(void) {
-    return s_manual_stop;
+    if (s_manual_stop) {
+        return true;
+    }
+    /* La clip da GUI/DEMO usava solo il pulsante Stop. D2 non la chiudeva,
+     * e in config il poller dello STOP veniva scartato. */
+    if (core_gpio_is_rec_stop_triggered()) {
+        ESP_LOGI(TAG, "D2/STOP LOW — chiudo la registrazione in corso");
+        if (s_active_rec_job) {
+            s_active_rec_job->user_stop = true;
+        }
+        s_manual_stop = true;
+        return true;
+    }
+    return false;
 }
 
 static bool rec_stop_should_stop(void) {
@@ -3919,7 +3944,7 @@ static bool photo_session_should_stop(const core_settings_t *settings, uint32_t 
         if (core_settings_rec_stop_is_timer(settings)) {
             return photo_count >= settings->rec_session_sec;
         }
-        return false;
+        return core_gpio_is_rec_stop_triggered();
     }
     if (core_settings_rec_stop_is_timer(settings)) {
         // A 1 fps: N secondi → esattamente N JPEG (non wall-clock: altrimenti acquire lento → meno foto).
@@ -4072,8 +4097,10 @@ static bool recorder_run_photo_session(const core_settings_t *settings) {
         s_manual_starting = false;
     }
 
-    // LED subito: il settle sotto non deve sembrare "morto".
-    core_status_led_set_mode(CORE_LED_RECORDING);
+    /* PIR: fisso solo dal primo JPEG valido, non durante il settle. */
+    if (!core_rec_fast_requested()) {
+        core_status_led_set_mode(CORE_LED_RECORDING);
+    }
 
     // AE fuori dal timer sessione (no_wait: acquire bloccante a 1 fps allungava il settle).
     const uint32_t ae_settle_ms = core_rec_fast_requested()
@@ -4185,6 +4212,9 @@ static bool recorder_run_photo_session(const core_settings_t *settings) {
         char path[160];
         snprintf(path, sizeof(path), "%s_foto%04lu.jpg", session_base, (unsigned long)photo_count);
         if (photo_count == 1) {
+            if (core_rec_fast_requested()) {
+                core_status_led_set_mode(CORE_LED_RECORDING);
+            }
             core_note_first_encoded_frame("photo-jpeg", (unsigned long)frame.size);
             ESP_LOGI(TAG, "Photo: primo JPEG %lu byte %ux%u",
                      (unsigned long)frame.size, (unsigned)pc.width, (unsigned)pc.height);
@@ -4399,19 +4429,16 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
         ESP_LOGI(TAG, "DEMO: encoder H264 con parametri PIR (GOP<=%u), primi frame tenuti",
                  (unsigned)CORE_REC_PIR_GOP);
     } else if (!pir_fast && !demo_rec) {
-        if (core_rtsp_rec_attach(settings) != 0) {
-            ESP_LOGE(TAG, "Streamer H.264 non disponibile — registrazione non avviata");
-            snprintf(s_manual_error, sizeof(s_manual_error), "Streamer non pronto");
-            core_gpio_rec_stop_session_end();
-            vEventGroupDelete(sd_ctx.ev);
-            return false;
-        }
-        link.share = true;
+        /* RTSP e file locale non condividono la camera: il secondo encoder
+         * (canale 2) e la copia NAL facevano cadere il file a pochi fps. */
+        core_rtsp_hold();
+        link.held = true;
+        ESP_LOGI(TAG, "Registrazione locale: RTSP fermo, un solo encoder");
     } else {
         core_rtsp_hold();
         link.held = true;
     }
-    /* GUI record shares the streamer. PIR still takes the camera alone. */
+    /* Registrazione locale e PIR tengono la camera da soli. */
     bool adopt_vi = false;
     if (!link.share && !pir_fast && !rec_fast) {
         core_settings_t vcfg = *settings;
@@ -4649,7 +4676,7 @@ static bool recorder_run_core(const core_settings_t *settings, recorder_should_s
     }
 
     if (pir_fast) {
-        core_status_led_set_mode(CORE_LED_RECORDING);
+        /* Il fisso parte nel ring, al primo frame tenuto, non all'apertura. */
         if (core_settings_rec_stop_is_timer(settings)) {
             ESP_LOGI(TAG, "Stop sessione: timer %lu s (pin STOP ignorato) — poi DONE",
                      (unsigned long)settings->rec_session_sec);

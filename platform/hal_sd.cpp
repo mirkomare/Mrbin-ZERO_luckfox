@@ -28,17 +28,49 @@ static bool dir_ok(const char *mp) {
 }
 
 #ifndef _WIN32
-static bool path_mount_line(const char *mp, char *rest_out, size_t rest_len) {
+/* Opzioni come in /proc/mounts: "vfat ro,noatime,... 0 0". Il token è "ro",
+ * non la sottostringa di errors=remount-ro. */
+static bool mount_opts_readonly(const char *rest) {
+    if (!rest || !rest[0]) {
+        return false;
+    }
+    const char *opts = strchr(rest, ' ');
+    if (!opts) {
+        return false;
+    }
+    while (*opts == ' ') {
+        ++opts;
+    }
+    const char *end = strchr(opts, ' ');
+    size_t n = end ? (size_t)(end - opts) : strlen(opts);
+    size_t i = 0;
+    while (i < n) {
+        size_t start = i;
+        while (i < n && opts[i] != ',') {
+            ++i;
+        }
+        if ((i - start) == 2 && opts[start] == 'r' && opts[start + 1] == 'o') {
+            return true;
+        }
+        if (i < n && opts[i] == ',') {
+            ++i;
+        }
+    }
+    return false;
+}
+
+static bool mount_fields(const char *mp, char *dev_out, size_t dev_len) {
     FILE *fp = fopen("/proc/mounts", "r");
-    if (!fp) {
+    if (!fp || !mp) {
+        if (fp) fclose(fp);
         return false;
     }
     char dev[128], dir[160], rest[256];
     bool ok = false;
     while (fscanf(fp, "%127s %159s %255[^\n]", dev, dir, rest) == 3) {
-        if (strcmp(dir, mp) == 0 && strstr(dev, "mmcblk") != nullptr) {
-            if (rest_out && rest_len > 0) {
-                snprintf(rest_out, rest_len, "%s", rest);
+        if (strcmp(dir, mp) == 0) {
+            if (dev_out && dev_len > 0) {
+                snprintf(dev_out, dev_len, "%s", dev);
             }
             ok = true;
             break;
@@ -49,21 +81,39 @@ static bool path_mount_line(const char *mp, char *rest_out, size_t rest_len) {
 }
 
 static bool path_is_mounted(const char *mp) {
-    return path_mount_line(mp, nullptr, 0);
+    return mount_fields(mp, nullptr, 0);
 }
 
-static bool mount_opts_readonly(const char *rest) {
-    if (!rest || !rest[0]) {
-        return false;
+/* Dal mount point (anche bind) al block device. /sdcard → /mnt/sdcard → mmcblk. */
+static bool resolve_block_dev(const char *mp, char *dev_out, size_t dev_len) {
+    char cur[160];
+    snprintf(cur, sizeof(cur), "%s", mp ? mp : "");
+    for (int hop = 0; hop < 4; ++hop) {
+        char dev[128];
+        if (!mount_fields(cur, dev, sizeof(dev))) {
+            return false;
+        }
+        if (strncmp(dev, "/dev/", 5) == 0) {
+            snprintf(dev_out, dev_len, "%s", dev);
+            return true;
+        }
+        snprintf(cur, sizeof(cur), "%s", dev);
     }
-    return strstr(rest, "(ro,") != nullptr || strstr(rest, ",ro,") != nullptr ||
-           strstr(rest, "(ro)") != nullptr;
+    return false;
 }
+
+static bool dev_is_system_emmc(const char *dev);
 
 static bool try_mount_dev(const char *dev, const char *mp);
 
 bool hal_sd_probe_write(const char *mp) {
     mp = sd_mount_point(mp);
+    char dev[128];
+    /* Senza questo, /sdcard non montata è una directory su eMMC e il probe
+     * riesce sul rootfs, non sulla scheda. */
+    if (!resolve_block_dev(mp, dev, sizeof(dev)) || dev_is_system_emmc(dev)) {
+        return false;
+    }
     char path[192];
     snprintf(path, sizeof(path), "%s/.mrbin_rw_probe", mp);
     FILE *fp = fopen(path, "wb");
@@ -77,11 +127,29 @@ bool hal_sd_probe_write(const char *mp) {
 
 bool hal_sd_mount_is_readonly(const char *mp) {
     mp = sd_mount_point(mp);
-    char rest[256];
-    if (!path_mount_line(mp, rest, sizeof(rest))) {
+    char block[128];
+    if (!resolve_block_dev(mp, block, sizeof(block))) {
         return false;
     }
-    return mount_opts_readonly(rest);
+    FILE *fp = fopen("/proc/mounts", "r");
+    if (!fp) {
+        return false;
+    }
+    char dev[128], dir[160], rest[256];
+    bool ro = false;
+    bool saw = false;
+    while (fscanf(fp, "%127s %159s %255[^\n]", dev, dir, rest) == 3) {
+        if (strcmp(dev, block) != 0) {
+            continue;
+        }
+        saw = true;
+        if (mount_opts_readonly(rest)) {
+            ro = true;
+        }
+    }
+    fclose(fp);
+    (void)dir;
+    return saw && ro;
 }
 
 static void release_sdmmc_cmd(void) {
@@ -139,8 +207,11 @@ static bool hal_sd_run_on_dev(const char *const *tools, const char *flags, const
         if (access(tools[i], X_OK) != 0) {
             continue;
         }
-        char cmd[256];
-        snprintf(cmd, sizeof(cmd), "%s %s %s 2>/dev/null", tools[i], flags, dev);
+        char cmd[320];
+        /* stdin da /dev/null: fsck non può restare in attesa di [y/n]. */
+        snprintf(cmd, sizeof(cmd),
+                 "%s %s %s </dev/null >/tmp/mrbin-fsck.log 2>&1",
+                 tools[i], flags ? flags : "", dev);
         if (system(cmd) == 0) {
             return true;
         }
@@ -177,23 +248,106 @@ static bool hal_sd_mount_dev_rw(const char *dev, const char *mp) {
 
 static bool dev_is_system_emmc(const char *dev);
 static bool pick_sd_dev(char *out, size_t len);
+static bool bind_existing_vfat(const char *mp);
+
+struct sd_mnt_ent {
+    char dev[128];
+    char dir[160];
+};
+
+static int read_mounts(struct sd_mnt_ent *out, int max) {
+    FILE *fp = fopen("/proc/mounts", "r");
+    if (!fp || max <= 0) {
+        if (fp) fclose(fp);
+        return 0;
+    }
+    int n = 0;
+    char rest[256];
+    while (n < max && fscanf(fp, "%127s %159s %255[^\n]", out[n].dev, out[n].dir, rest) == 3) {
+        n++;
+    }
+    fclose(fp);
+    return n;
+}
+
+static bool umount_dir(const char *dir) {
+    if (!dir || !dir[0]) {
+        return false;
+    }
+    if (umount2(dir, 0) == 0) {
+        return true;
+    }
+    if (umount2(dir, MNT_DETACH) == 0) {
+        for (int i = 0; i < 25; ++i) {
+            if (!path_is_mounted(dir)) {
+                return true;
+            }
+            usleep(100000);
+        }
+    }
+    return !path_is_mounted(dir);
+}
+
+/* Smonta bind e mount reali. fsck su un volume ancora montato corrompe la FAT. */
+static bool umount_dev_everywhere(const char *dev) {
+    if (!dev || !dev[0]) {
+        return false;
+    }
+    for (int pass = 0; pass < 8; ++pass) {
+        struct sd_mnt_ent ents[48];
+        int n = read_mounts(ents, 48);
+        int bind_i = -1;
+        int real_i = -1;
+        for (int i = 0; i < n; ++i) {
+            if (strcmp(ents[i].dev, dev) == 0) {
+                real_i = i;
+                continue;
+            }
+            if (ents[i].dev[0] != '/') {
+                continue;
+            }
+            for (int j = 0; j < n; ++j) {
+                if (strcmp(ents[j].dir, ents[i].dev) == 0 && strcmp(ents[j].dev, dev) == 0) {
+                    bind_i = i;
+                    break;
+                }
+            }
+        }
+        if (bind_i < 0 && real_i < 0) {
+            return true;
+        }
+        const char *victim = bind_i >= 0 ? ents[bind_i].dir : ents[real_i].dir;
+        if (!umount_dir(victim)) {
+            ESP_LOGE("hal_sd", "umount %s fallito, %s resta montato", victim, dev);
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool s_fsck_ran = false;
 
 bool hal_sd_repair_vfat(const char *mp) {
     mp = sd_mount_point(mp);
     char dev[128];
-    if (!path_mount_device(mp, dev, sizeof(dev)) && !pick_sd_dev(dev, sizeof(dev))) {
+    if (!resolve_block_dev(mp, dev, sizeof(dev)) && !pick_sd_dev(dev, sizeof(dev))) {
         return false;
     }
     if (dev_is_system_emmc(dev)) {
         return false;
     }
-    if (path_is_mounted(mp)) {
-        umount2(mp, MNT_DETACH);
+    if (s_fsck_ran) {
+        return hal_sd_probe_write(mp);
+    }
+    if (!umount_dev_everywhere(dev)) {
+        ESP_LOGE("hal_sd", "fsck saltato: %s ancora montato", dev);
+        return false;
     }
     sync();
+    s_fsck_ran = true;
+    /* Solo -a. -r è interattivo e blocca il thread HTTP su [y/n]. */
     (void)hal_sd_run_on_dev(k_fsck_fat, "-a -w", dev);
-    (void)hal_sd_run_on_dev(k_fsck_fat, "-r", dev);
-    return hal_sd_mount_dev_rw(dev, mp);
+    return hal_sd_mount_dev_rw(dev, mp) && hal_sd_probe_write(mp);
 }
 
 bool hal_sd_format_vfat(const char *mp, const char *dev_hint) {
@@ -207,8 +361,8 @@ bool hal_sd_format_vfat(const char *mp, const char *dev_hint) {
     if (dev_is_system_emmc(dev)) {
         return false;
     }
-    if (path_is_mounted(mp)) {
-        umount2(mp, MNT_DETACH);
+    if (!umount_dev_everywhere(dev)) {
+        return false;
     }
     sync();
     bool mk = false;
@@ -231,26 +385,36 @@ bool hal_sd_format_vfat(const char *mp, const char *dev_hint) {
 
 bool hal_sd_remount_rw(const char *mp) {
     mp = sd_mount_point(mp);
-    if (!path_is_mounted(mp)) {
+    char dev[128];
+    if (!resolve_block_dev(mp, dev, sizeof(dev)) && !pick_sd_dev(dev, sizeof(dev))) {
         return false;
     }
-    if (mount(nullptr, mp, nullptr, MS_REMOUNT, "rw") == 0 &&
-        !hal_sd_mount_is_readonly(mp)) {
-        return true;
+    if (dev_is_system_emmc(dev)) {
+        return false;
     }
-    if (mount(nullptr, mp, "vfat", MS_REMOUNT, "rw,umask=000") == 0 &&
-        !hal_sd_mount_is_readonly(mp)) {
-        return true;
+    struct sd_mnt_ent ents[48];
+    int n = read_mounts(ents, 48);
+    for (int i = 0; i < n; ++i) {
+        if (strcmp(ents[i].dev, dev) != 0) {
+            continue;
+        }
+        if (mount(nullptr, ents[i].dir, nullptr, MS_REMOUNT, "rw") != 0) {
+            (void)mount(nullptr, ents[i].dir, "vfat", MS_REMOUNT, "rw,umask=000");
+        }
     }
-    char dev[128];
-    if (!path_mount_device(mp, dev, sizeof(dev))) {
-        return hal_sd_repair_vfat(mp);
+    if (!path_is_mounted(mp)) {
+        if (!bind_existing_vfat(mp)) {
+            (void)hal_sd_mount_dev_rw(dev, mp);
+        }
     }
-    umount2(mp, MNT_DETACH);
-    if (hal_sd_mount_dev_rw(dev, mp)) {
-        return true;
+    if (hal_sd_mount_is_readonly(mp) || !hal_sd_probe_write(mp)) {
+        char src[128];
+        if (mount_fields(mp, src, sizeof(src)) && strncmp(src, "/dev/", 5) != 0) {
+            (void)umount_dir(mp);
+            (void)bind_existing_vfat(mp);
+        }
     }
-    return hal_sd_repair_vfat(mp);
+    return !hal_sd_mount_is_readonly(mp) && hal_sd_probe_write(mp);
 }
 
 /* Pico Zero eMMC: mmcblk0 è il disco di sistema. La SD è mmcblk2

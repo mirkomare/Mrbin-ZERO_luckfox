@@ -106,6 +106,7 @@ void core_settings_osd_set_defaults(core_settings_t *s) {
     s->osd_x_pct = (uint8_t)CORE_REC_OSD_X_PCT_DEFAULT;
     s->osd_y_pct = (uint8_t)CORE_REC_OSD_Y_PCT_DEFAULT;
     s->rtsp_always = false;
+    s->demo_enable = false;
 }
 
 bool core_settings_osd_font_valid(uint8_t font) {
@@ -264,7 +265,7 @@ uint32_t core_settings_bitrate_for(uint16_t width, uint16_t height, uint8_t fps)
         return CORE_VIDEO_BITRATE_DEFAULT;
     }
     uint64_t bps = ((uint64_t)CORE_VIDEO_BITRATE_DEFAULT * px) / base_px;
-    /* 0.28 bit per pixel: 8 MP at 15 fps sits on the 28 Mbps cap. */
+    /* 0.28 bit per pixel: 8 MP at 15 fps uses the 32 Mbps cap. */
     uint64_t motion = (px * 28ULL) / 100ULL;
     if (bps < motion) {
         bps = motion;
@@ -293,7 +294,7 @@ uint32_t core_settings_video_gop(const core_settings_t *s) {
     if (fps == 0) {
         fps = (uint8_t)CORE_VIDEO_FPS_DEFAULT;
     }
-    if (s && (uint32_t)s->video_width * (uint32_t)s->video_height > (1920u * 1080u)) {
+    if (s && (uint32_t)s->video_width * (uint32_t)s->video_height > (1280u * 720u)) {
         uint32_t gop = (uint32_t)fps / 2U;
         if (gop < 4U) {
             gop = 4U;
@@ -473,6 +474,10 @@ bool core_settings_load(core_settings_t *out) {
     if (nvs_get_u8(s_nvs, "rtsp_on", &rtsp_on) == ESP_OK) {
         out->rtsp_always = (rtsp_on != 0);
     }
+    uint8_t demo_en = 0;
+    if (nvs_get_u8(s_nvs, "demo_en", &demo_en) == ESP_OK) {
+        out->demo_enable = (demo_en != 0);
+    }
     core_settings_video_normalize(out);
     core_settings_osd_normalize(out);
     return true;
@@ -544,6 +549,8 @@ bool core_settings_save(const core_settings_t *in) {
     err = nvs_set_u8(s_nvs, "osd_y_pct", osd.osd_y_pct);
     if (err != ESP_OK) return false;
     err = nvs_set_u8(s_nvs, "rtsp_on", in->rtsp_always ? 1 : 0);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u8(s_nvs, "demo_en", in->demo_enable ? 1 : 0);
     if (err != ESP_OK) return false;
     err = nvs_commit(s_nvs);
     if (err != ESP_OK) {

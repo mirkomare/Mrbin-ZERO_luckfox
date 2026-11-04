@@ -1,0 +1,66 @@
+diff --git a/sysdrv/source/kernel/drivers/media/i2c/imx415.c b/sysdrv/source/kernel/drivers/media/i2c/imx415.c
+index f26e2edf4..644af0b3c 100644
+--- a/sysdrv/source/kernel/drivers/media/i2c/imx415.c
++++ b/sysdrv/source/kernel/drivers/media/i2c/imx415.c
+@@ -1268,13 +1268,13 @@ static const struct imx415_mode supported_modes[] = {
+ 		.height = 2192,
+ 		.max_fps = {
+ 			.numerator = 10000,
+-			.denominator = 200000,
++			.denominator = 300000,
+ 		},
+ 		.exp_def = 0x08ca - 0x08,
+ 		.hts_def = 0x044c * IMX415_4LANES * 2,
+ 		.vts_def = 0x08ca,
+ 		.global_reg_list = imx415_global_10bit_3864x2192_regs,
+-		.reg_list = imx415_linear_10bit_3864x2192_594M_regs,
++		.reg_list = imx415_linear_10bit_3864x2192_891M_regs,
+ 		.hdr_mode = NO_HDR,
+ 		.mipi_freq_idx = 1,
+ 		.bpp = 10,
+diff --git a/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/hw.c b/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/hw.c
+index 131a4e2f6..af3d3139b 100644
+--- a/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/hw.c
++++ b/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/hw.c
+@@ -743,6 +743,10 @@ static struct isp_irqs_data rv1126_isp_irqs[] = {
+ static const struct isp_match_data rv1106_isp_match_data = {
+ 	.clks = rv1106_isp_clks,
+ 	.num_clks = ARRAY_SIZE(rv1106_isp_clks),
++	/* Stay on V32. V32_L made VI EnableChn fail on this Pico
++	 * (ret 0xffffffff) even though 3840x2160 was accepted.
++	 * The 1–5 fps cap is the dts rockchip,unite=1 path, which
++	 * the probe below ignores for this chip. */
+ 	.isp_ver = ISP_V32,
+ 	.clk_rate_tbl = rv1106_isp_clk_rate,
+ 	.num_clk_rate_tbl = ARRAY_SIZE(rv1106_isp_clk_rate),
+@@ -1148,10 +1152,12 @@ static int rkisp_hw_probe(struct platform_device *pdev)
+ 	if (match_data->unite) {
+ 		hw_dev->unite = ISP_UNITE_TWO;
+ 	} else if (!device_property_read_u32(dev, "rockchip,unite", &unite_state)) {
+-		if ( unite_state == 1 ) {
+-			hw_dev->unite = ISP_UNITE_ONE;
+-			hw_dev->base_next_addr = hw_dev->base_addr;
+-		}
++		/* The Pico Zero dts sets this to 1. That mode splits every
++		 * frame into two memory readbacks, so a 2880p file stays
++		 * near 4 fps and 8 MP near 1 fps. One pass stops at
++		 * 3072x1728; 3840 drops the MIPI frame. */
++		(void)unite_state;
++		hw_dev->unite = ISP_UNITE_NONE;
+ 	} else if (device_property_read_bool(dev, "rockchip,unite-en")) {
+ 		hw_dev->unite = ISP_UNITE_ONE;
+ 		hw_dev->base_next_addr = hw_dev->base_addr;
+diff --git a/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/rkisp.h b/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/rkisp.h
+index ebd37c274..6654ae693 100644
+--- a/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/rkisp.h
++++ b/sysdrv/source/kernel/drivers/media/platform/rockchip/isp/rkisp.h
+@@ -55,6 +55,9 @@
+ #define CIF_ISP_INPUT_H_MAX_V30		3504
+ #define CIF_ISP_INPUT_W_MAX_V30_UNITE	8192
+ #define CIF_ISP_INPUT_H_MAX_V30_UNITE	6144
++/* 3840x2160 on this RV1106 drops the MIPI frame and the picture
++ * never finishes, so a record opens and then dies with no frame.
++ * 3072x1728 is the size that streams in one pass. */
+ #define CIF_ISP_INPUT_W_MAX_V32		3072
+ #define CIF_ISP_INPUT_H_MAX_V32		1728
+ #define CIF_ISP_INPUT_W_MAX_V32_UNITE	3840

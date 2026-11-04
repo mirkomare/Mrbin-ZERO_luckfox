@@ -243,7 +243,11 @@ static void log_wake_source(bool config_mode, bool rtc_programming) {
         return;
     }
     if (config_mode) {
-        ESP_LOGI(TAG, "Wake: CONFIG (GPIO%d MODE HIGH)", (int)CORE_GPIO_MODE_CFG);
+        if (core_gpio_is_mode_config()) {
+            ESP_LOGI(TAG, "Wake: CONFIG (GPIO%d MODE HIGH)", (int)CORE_GPIO_MODE_CFG);
+        } else {
+            ESP_LOGI(TAG, "Wake: CONFIG — né PIR né sveglia RTC (A1F)");
+        }
         return;
     }
     if (core_gpio_boot_was_pir_wake()) {
@@ -346,6 +350,10 @@ static void run_sync_mode(void) {
         return;
     }
 
+    /* The GUI is up for the whole ping/upload window. Without this the
+     * RTSP button only logs "acceso" and nothing listens on 554. */
+    core_rtsp_start(&g_settings);
+
     core_recorder_recover_tmp_files(&g_settings);
     core_recorder_process_pending_encrypt(&g_settings);
 
@@ -377,8 +385,9 @@ static void run_config_mode(void) {
     core_gpio_modem_pwr_set(true);  // GPIO5 3.3 V
     ESP_LOGI(TAG, "GPIO%d HIGH — configurazione (WiFi/Web), GPIO46 LOW (HUB) modem GPIO%d ON",
              CORE_GPIO_MODE_CFG, CORE_GPIO_MODEM_PWR);
-    if (s_force_config) {
-        // MODE is typically LOW when forced — do not exit until HIGH then LOW.
+    if (s_force_config || !core_gpio_is_mode_config()) {
+        /* MODE già LOW: non uscire finché non sale HIGH e poi ridiscende.
+         * Altrimenti il fallback «né PIR né RTC» spegnerebbe subito. */
         core_gpio_mode_exit_session_begin_rtc();
     } else {
         core_gpio_mode_exit_session_begin();
@@ -404,7 +413,7 @@ static void run_config_mode(void) {
     s_mrbin_upload_cancel = false;
     xTaskCreate(mrbin_upload_task, "mb_up", 16384, nullptr, 3, nullptr);
 
-    if (core_gpio_is_demo_jumper()) {
+    if (core_demo_is_active()) {
         core_rtsp_hold();
     }
     core_rtsp_start(&g_settings);
@@ -566,7 +575,7 @@ extern "C" void app_main(void) {
              core_rtc_is_present() ? 1 : 0, core_rtc_boot_was_alarm_wake() ? 1 : 0);
 
     if (s_force_config) {
-        core_demo_latch_from_boot(true);
+        core_demo_latch_from_boot(&g_settings);
         /* Solo skip routing SQW/PIR — A1F già latched sopra per STATUS-BOOT. */
         ESP_LOGW(TAG, "FORCE_CONFIG — skip SQW/PIR routing, avvio CONFIG con Stato HW");
         boot_rtc_programming_full();
@@ -587,16 +596,20 @@ extern "C" void app_main(void) {
         return;
     }
 
-    // MODE HIGH vince su A1F/SQW→sync: altrimenti la sveglia RTC azzera A1F in sync
-    // (senza GUI) e in CONFIG successivo STATUS-BOOT resta CLEAR (0) con solo il log NVS.
+    // MODE HIGH vince su A1F: la sveglia non deve fare sync senza GUI.
+    // SQW basso da solo non è una sveglia (pull-down). Match RTC = solo A1F.
+    // Né PIR né A1F → CONFIG, GUI accesa. Niente DONE immediato.
     const bool a1f_wake = core_rtc_boot_was_alarm_wake();
-    const bool sqw_wake = core_gpio_boot_was_sqw_low();
+    const bool sqw_low = core_gpio_boot_was_sqw_low();
     const bool config_mode = core_gpio_is_mode_config();
-    ESP_LOGI(TAG, "Routing boot: SQW=%d A1F_wake=%d MODE=%d",
-             sqw_wake ? 1 : 0, a1f_wake ? 1 : 0, config_mode ? 1 : 0);
+    const bool pir_wake = core_gpio_boot_was_pir_wake();
+    ESP_LOGI(TAG, "Routing boot: SQW=%d A1F_wake=%d MODE=%d PIR=%d demo_en=%d",
+             sqw_low ? 1 : 0, a1f_wake ? 1 : 0, config_mode ? 1 : 0,
+             pir_wake ? 1 : 0, g_settings.demo_enable ? 1 : 0);
 
-    if (config_mode) {
-        core_demo_latch_from_boot(true);
+    const bool enter_config = config_mode || (!a1f_wake && !pir_wake);
+    if (enter_config) {
+        core_demo_latch_from_boot(&g_settings);
         boot_rtc_programming_full();
         ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());
         core_video_detect_sensor();
@@ -605,8 +618,13 @@ extern "C" void app_main(void) {
         core_video_set_bayer_mode(g_settings.video_bayer_mode);
         core_video_set_flip(g_settings.video_vflip, g_settings.video_hflip);
         log_wake_source(true, false);
-        if (a1f_wake) {
+        if (config_mode && a1f_wake) {
             ESP_LOGI(TAG, "CONFIG + A1F: STATUS-BOOT A1F=SET (1), clear già registrato");
+        }
+        if (!config_mode) {
+            ESP_LOGI(TAG,
+                     "Né PIR né RTC (A1F) — CONFIG. SQW=%d ignorato (non è sveglia)",
+                     sqw_low ? 1 : 0);
         }
         if (!core_status_led_init()) {
             ESP_LOGW(TAG, "LED GPIO%d non disponibile — feedback visivo disabilitato",
@@ -620,8 +638,8 @@ extern "C" void app_main(void) {
         return;
     }
 
-    // MODE LOW: RTC (A1F) o SQW LOW → sync upload poi DONE (niente GUI).
-    if (sqw_wake || a1f_wake) {
+    // MODE LOW + A1F vero: sync upload poi DONE (niente GUI).
+    if (a1f_wake) {
         core_gpio_rtc_programming_begin();
         boot_rtc_programming_full();
         ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());
@@ -642,18 +660,7 @@ extern "C" void app_main(void) {
         return;
     }
 
-    // PIR: solo wake legittimo (pin START LOW al boot).
-    const bool pir_wake = core_gpio_boot_was_pir_wake();
-    if (!pir_wake) {
-        core_gpio_boot_snapshot_t snap = {};
-        core_gpio_get_boot_snapshot(&snap);
-        ESP_LOGW(TAG,
-                 "PIR: wake non valido — start=GPIO%d D1=%d D2=%d SQW=%d — DONE TPL immediato",
-                 (int)g_settings.rec_gpio_start, snap.d1_level, snap.d2_level, snap.sqw_level);
-        core_gpio_hold_tpl_done(0);
-        return;
-    }
-    // Wake PIR: sync ora leggero — niente monitoraggio HW / clear A1F / log.
+    // Wake PIR: pin START LOW allo snapshot. Sync ora leggero.
     boot_rtc_recording_only();
     log_wake_source(false, false);
     ESP_LOGI(TAG, "Boot init (%lld ms)", (long long)core_boot_elapsed_ms());

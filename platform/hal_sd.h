@@ -57,7 +57,7 @@ bool hal_sd_probe_mount(const char *mp);
 /* Kernel vfat spesso finisce in ro (errors=remount-ro) dopo un errore I/O. */
 bool hal_sd_mount_is_readonly(const char *mp);
 bool hal_sd_remount_rw(const char *mp);
-/* fsck.vfat + rimonta rw (volume smontato male / kernel ro). */
+/* fsck.vfat -a una sola volta, stdin da /dev/null, solo a volume smontato. */
 bool hal_sd_repair_vfat(const char *mp);
 bool hal_sd_format_vfat(const char *mp, const char *dev);
 bool hal_sd_probe_write(const char *mp);
